@@ -4,6 +4,7 @@ PyQt6
 # PyQt6-Qt6 # Usually installed with PyQt6
 # setproctitle # Optional, commented out in main.py
 
+
 # RAG & Embeddings
 sentence-transformers>=2.2.0 # Installs torch, transformers
 torch # Often installed by sentence-transformers, but good to specify

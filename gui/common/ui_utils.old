@@ -1,0 +1,46 @@
+import os
+from datetime import datetime
+from PyQt6.QtWidgets import QTableWidgetItem
+import logging
+
+
+def resize_table_columns(table_widget, column_widths):
+    """
+    Set fixed widths for each column in a QTableWidget.
+    """
+    table_widget.resizeColumnsToContents()
+    for i, width in enumerate(column_widths):
+        table_widget.setColumnWidth(i, width)
+
+
+def populate_document_table(table_widget, file_list, index_check_fn):
+    """
+    Populate a QTableWidget with document file information.
+    """
+    table_widget.setRowCount(len(file_list))
+
+    for row, filename in enumerate(file_list):
+        file_path = os.path.join(os.path.dirname(file_list[0]), filename) #This could be an issue
+
+        # Filename
+        table_widget.setItem(row, 0, QTableWidgetItem(filename))
+
+        # Modified date
+        try:
+            mod_time = datetime.fromtimestamp(os.path.getmtime(file_path)).strftime("%Y-%m-%d")
+        except OSError as e:
+            logging.warning(f"Error getting modification time for {filename}: {e}")
+            mod_time = "N/A"
+        table_widget.setItem(row, 1, QTableWidgetItem(mod_time))
+
+        # In Index status
+        in_index = "Yes" if index_check_fn(filename) else "No"
+        table_widget.setItem(row, 2, QTableWidgetItem(in_index))
+
+
+def ensure_directory_exists(path):
+    """
+    Create a directory if it doesn't exist.
+    """
+    if not os.path.exists(path):
+        os.makedirs(path)

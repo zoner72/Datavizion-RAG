@@ -1,0 +1,64 @@
+# Core Application & GUI
+PyQt6
+# PyQt6-sip # Usually installed with PyQt6
+# PyQt6-Qt6 # Usually installed with PyQt6
+# setproctitle # Optional, commented out in main.py
+
+# RAG & Embeddings
+sentence-transformers>=2.2.0 # Installs torch, transformers
+torch # Often installed by sentence-transformers, but good to specify
+transformers>=4.0.0 # Often installed by sentence-transformers
+qdrant-client>=1.7.0 # Check for latest compatible version
+numpy
+
+# LLM Interaction & API
+requests
+# lmstudio # Needs manual install via their website/app - cannot pip install
+openai # If using OpenAI provider
+gpt4all # If using GPT4All provider (check install instructions, might need specifics)
+# ollama # Usually run as separate service, no direct pip install needed for client usually (uses requests)
+# jan # Usually run as separate service, no direct pip install needed for client usually (uses requests)
+
+# Data Loading & Preprocessing
+PyMuPDF # fitz
+python-docx # docx
+nltk>=3.6.0
+chardet # For scrape_pdfs.py encoding detection
+beautifulsoup4>=4.9.0 # bs4
+lxml # Parser for BeautifulSoup (used in scrape_pdfs.py)
+# html5lib # Optional fallback parser for BeautifulSoup
+
+# API Server
+fastapi>=0.90.0
+uvicorn[standard]>=0.18.0 # [standard] includes websockets, http-tools etc.
+
+# Async & Web Scraping
+aiohttp>=3.8.0
+aiofiles>=0.8.0
+tqdm # For progress bars (used in scrape_pdfs.py)
+
+# Other Utilities
+httpx>=0.20.0 # Used by qdrant-client
+
+# Potentially Obsolete/Unused (based on analysis)
+# mcp # For mcp_client.py and rag_mcp_server.py (if actually used)
+
+
+pip install \
+    pydantic \
+    PyQt6 \
+    sentence-transformers \
+    transformers \
+    torch \
+    numpy \
+    qdrant-client \
+    httpx \
+    requests \
+    beautifulsoup4 \
+    aiohttp \
+    aiofiles \
+    chardet \
+    tqdm \
+    PyMuPDF \
+    python-docx \
+    nltk

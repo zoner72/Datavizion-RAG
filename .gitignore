@@ -4,3 +4,52 @@
 /app_logs
 /cache
 /data
+gui/tabs/status/__pycache__/__init__.cpython-311.pyc
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyc
+*.pyd
+
+# C extensions
+*.so
+*.cpython-*
+
+# Virtual environments
+venv/
+env/
+.venv/
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# IDEs and editors
+.vscode/
+.idea/
+*.swp
+
+# Logs and temp files
+*.log
+*.tmp
+*.bak
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Tests and coverage
+.coverage
+htmlcov/
+.tox/
+.pytest_cache/
+
+# Build
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# MyPy
+.mypy_cache/
+.dmypy.json
+gui/tabs/chat/__pycache__/chat_tab.cpython-311.pyc

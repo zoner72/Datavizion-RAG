@@ -1,8 +1,8 @@
-# File: scripts/llm/llm_interface.py (Corrected Dispatch Logic)
+# File: scripts/llm/llm_interface.py (Reflecting API-based interaction for LM Studio/GPT4All)
 
 import logging
 import json
-import requests
+import requests # Essential for API calls
 import torch
 import re
 import os
@@ -11,659 +11,952 @@ from typing import Optional, List, Any, Dict, Callable # Ensure typing imports a
 
 
 # --- Pydantic Config Import ---
+# Assumes config_models.py is accessible via sys.path
 try:
     from config_models import MainConfig
     pydantic_available = True
 except ImportError as e:
     logging.critical(f"FATAL ERROR: LLM Interface Pydantic import failed: {e}", exc_info=True)
     pydantic_available = False
+    # Dummy class for basic structure if import fails
     class MainConfig: pass
 
-# --- Optional Imports ---
-try: from sentence_transformers import CrossEncoder; cross_encoder_available = True
-except ImportError: CrossEncoder = None; cross_encoder_available = False; logging.warning("CrossEncoder not found.")
-try: from transformers import AutoTokenizer; tokenizer_available = True
-except ImportError: AutoTokenizer = None; tokenizer_available = False; logging.warning("AutoTokenizer not found.")
+# --- Optional Imports (Keep for Reranker/Tokenizer) ---
+try:
+    from sentence_transformers import CrossEncoder
+    cross_encoder_available = True
+except ImportError:
+    CrossEncoder = None
+    cross_encoder_available = False
+    logging.warning("CrossEncoder (for reranking) not found. Install sentence-transformers.")
+try:
+    from transformers import AutoTokenizer
+    tokenizer_available = True
+except ImportError:
+    AutoTokenizer = None
+    tokenizer_available = False
+    logging.warning("AutoTokenizer (for prompt size estimation) not found. Install transformers.")
 
 # --- Initialization ---
+# Basic logger setup, main app config might refine it
 logging.basicConfig(level=logging.INFO)
-_cross_encoder_instance = None; _loaded_reranker_model_name = None
-try: DEVICE = "cuda" if torch.cuda.is_available() else "cpu"; torch.cuda.init() if DEVICE == "cuda" else None
-except Exception as e: logging.warning(f"CUDA check/init failed: {e}"); DEVICE = "cpu"
+logger = logging.getLogger(__name__) # Create logger for this module
+
+_cross_encoder_instance = None
+_loaded_reranker_model_name = None
+try:
+    # Attempt to use CUDA if available
+    DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+    if DEVICE == "cuda":
+        # Optional: Explicitly initialize CUDA if needed by libraries
+        # torch.cuda.init() # Often not necessary, libraries handle it
+        pass
+except Exception as e:
+    logging.warning(f"CUDA check/initialization failed: {e}. Defaulting to CPU.")
+    DEVICE = "cpu"
 logging.info(f"LLM Interface using device: {DEVICE}")
 # --- End Initialization ---
 
 
-# --- format_prompt (Accepts MainConfig) ---
+# --- format_prompt (Accepts MainConfig, No changes needed) ---
 def format_prompt(system_prompt: str, query: str, retrieved_docs: list[tuple], config: MainConfig) -> str:
-    # ... (Implementation remains the same as previous corrected Pydantic version) ...
-    if not pydantic_available: return f"Error: Pydantic config unavailable.\n\nQuestion: {query}"
-    max_context_tokens = config.max_context_tokens; tokenizer = None
+    """Formats the final prompt string including context within token limits."""
+    if not pydantic_available:
+        logging.error("Cannot format prompt: Pydantic config unavailable.")
+        return f"Error: Pydantic config unavailable.\n\nQuestion: {query}"
+
+    # --- Configuration Values ---
+    max_context_tokens = config.max_context_tokens
+    # --- End Configuration Values ---
+
+    tokenizer = None
+    tokenizer_name = "gpt2" # Default tokenizer for estimation if specific one fails
     if tokenizer_available and AutoTokenizer:
-        try: tokenizer_name = "gpt2"; tokenizer = AutoTokenizer.from_pretrained(tokenizer_name, trust_remote_code=True)
-        except Exception as e: logging.warning(f"Tokenizer failed ('{tokenizer_name}'): {e}. Using word count."); tokenizer = None
-    else: logging.warning("AutoTokenizer unavailable. Using word count.")
-    context_lines = []; total_tokens_or_words = 0; prompt_header = f"{system_prompt}\n\nContext:\n"; prompt_footer = f"\n\nQuestion: {query}"; header_footer_size = 0
-    if tokenizer:
-        try: header_footer_size = len(tokenizer.encode(prompt_header + prompt_footer))
-        except Exception: header_footer_size = len((prompt_header + prompt_footer).split()); tokenizer=None
-    else: header_footer_size = len((prompt_header + prompt_footer).split())
+        try:
+            # Trust remote code might be needed for some tokenizers
+            tokenizer = AutoTokenizer.from_pretrained(tokenizer_name, trust_remote_code=True)
+            logging.debug(f"Loaded tokenizer '{tokenizer_name}' for prompt size estimation.")
+        except Exception as e:
+            logging.warning(f"Failed to load tokenizer '{tokenizer_name}': {e}. Using word count for size estimation.")
+            tokenizer = None # Fallback
+    else:
+        logging.warning("Transformers library not available. Using word count for prompt size estimation.")
+
+    context_lines = []
+    total_tokens_or_words = 0
+    prompt_header = f"{system_prompt}\n\nContext:\n"
+    prompt_footer = f"\n\nQuestion: {query}"
+    header_footer_size = 0
+    size_unit = "words" # Default unit
+
+    # Estimate header/footer size
+    try:
+        if tokenizer:
+            size_unit = "tokens"
+            header_footer_size = len(tokenizer.encode(prompt_header + prompt_footer))
+        else:
+            header_footer_size = len((prompt_header + prompt_footer).split())
+    except Exception as e:
+        logging.error(f"Error estimating header/footer size: {e}. Using word count.", exc_info=True)
+        tokenizer = None # Ensure fallback if tokenizer error occurs
+        size_unit = "words"
+        header_footer_size = len((prompt_header + prompt_footer).split())
+
     available_context_size = max_context_tokens - header_footer_size
-    logging.info(f"Formatting prompt. Max:{max_context_tokens}. Available:{available_context_size} {'tokens' if tokenizer else 'words'}.")
-    if not retrieved_docs: context_lines.append("[No relevant context documents found]")
+    logging.info(f"Formatting prompt. Max Context Size: {max_context_tokens} {size_unit}. Available for Docs: {available_context_size} {size_unit}.")
+
+    if not retrieved_docs:
+        context_lines.append("[No relevant context documents found]")
+
     added_chunk_count = 0
     for i, doc_tuple in enumerate(retrieved_docs):
         source, text, score = "Unknown Source", "", 0.0
+        # Safely unpack the document tuple
         try:
-            if len(doc_tuple) >= 3: source, text, score = str(doc_tuple[0] or "Unk"), str(doc_tuple[1] or ""), float(doc_tuple[2])
-            elif len(doc_tuple) == 2: source, text = str(doc_tuple[0] or "Unk"), str(doc_tuple[1] or "")
-            else: continue
-        except Exception as e: logging.warning(f"Error unpacking doc tuple: {e}"); continue
+            if len(doc_tuple) >= 3:
+                source, text, score = str(doc_tuple[0] or "Unknown"), str(doc_tuple[1] or ""), float(doc_tuple[2])
+            elif len(doc_tuple) == 2:
+                source, text = str(doc_tuple[0] or "Unknown"), str(doc_tuple[1] or "")
+            else:
+                 logging.warning(f"Skipping invalid document tuple format: {doc_tuple}")
+                 continue
+        except (ValueError, TypeError, IndexError) as e:
+            logging.warning(f"Error unpacking document tuple {doc_tuple}: {e}")
+            continue
+
         text = text.strip()
-        if not text: continue
-        chunk_header = f"=== Source: {os.path.basename(source)} | Score: {score:.2f} ===\n"; chunk_separator = "\n---\n"; full_chunk_text_for_size = chunk_header + text + chunk_separator; chunk_size = 0
-        if tokenizer:
-            try: chunk_size = len(tokenizer.encode(full_chunk_text_for_size))
-            except Exception: chunk_size = len(full_chunk_text_for_size.split()); tokenizer=None
-        else: chunk_size = len(full_chunk_text_for_size.split())
-        if total_tokens_or_words + chunk_size > available_context_size: logging.debug(f"Context limit. Skip {len(retrieved_docs) - i} docs."); break
+        if not text: continue # Skip empty documents
+
+        # Format chunk header and estimate size
+        chunk_header = f"=== Source: {os.path.basename(source)} | Score: {score:.2f} ===\n"
+        chunk_separator = "\n---\n"
+        full_chunk_text_for_size = chunk_header + text + chunk_separator
+        chunk_size = 0
+
+        try:
+            if tokenizer:
+                chunk_size = len(tokenizer.encode(full_chunk_text_for_size))
+            else:
+                chunk_size = len(full_chunk_text_for_size.split())
+        except Exception as e:
+             logging.error(f"Error estimating chunk size for source '{source}': {e}. Using word count.", exc_info=True)
+             tokenizer = None # Fallback for subsequent chunks
+             size_unit = "words"
+             chunk_size = len(full_chunk_text_for_size.split())
+
+        # Check if adding this chunk exceeds the limit
+        if total_tokens_or_words + chunk_size > available_context_size:
+            logging.info(f"Context limit reached. Skipping remaining {len(retrieved_docs) - i} documents.")
+            break # Stop adding documents
+
+        # Add chunk to context
         context_lines.append(chunk_header.strip())
-        if "[TABLE START]" in text and "[TABLE END]" in text: context_lines.append("[INFO: Table data]")
-        context_lines.append(text); context_lines.append("---"); total_tokens_or_words += chunk_size; added_chunk_count += 1
+        # Simple check for table-like content based on keywords
+        if "[TABLE START]" in text and "[TABLE END]" in text:
+            context_lines.append("[INFO: Potentially tabular data follows]") # Add indicator
+        context_lines.append(text)
+        context_lines.append("---") # Separator
+
+        total_tokens_or_words += chunk_size
+        added_chunk_count += 1
+
+    # Assemble final context block
     context_block = "\n".join(context_lines).strip()
-    if context_block.endswith("\n---"): context_block = context_block[:-4].strip()
-    full_prompt = f"{prompt_header}{context_block}{prompt_footer}"; final_size_estimate = total_tokens_or_words + header_footer_size
-    logging.info(f"Added {added_chunk_count} context chunks. Final size: ~{final_size_estimate} {'tokens' if tokenizer else 'words'}.")
+    # Clean trailing separator if present
+    if context_block.endswith("\n---"):
+        context_block = context_block[:-4].strip()
+
+    full_prompt = f"{prompt_header}{context_block}{prompt_footer}"
+    final_size_estimate = total_tokens_or_words + header_footer_size
+    logging.info(f"Added {added_chunk_count} context chunks. Final prompt size estimate: ~{final_size_estimate} {size_unit}.")
+
     return full_prompt
 
-# --- clean_llm_response (No changes) ---
+# --- clean_llm_response (No changes needed) ---
 def clean_llm_response(raw_response: str) -> str:
+    """Cleans up raw LLM response by removing code blocks and non-printable chars."""
+    # Remove markdown code blocks
     cleaned = re.sub(r"```[\s\S]*?```", "", raw_response)
+    # Remove non-printable characters except newline and tab
     cleaned = "".join(ch for ch in cleaned if ch.isprintable() or ch in "\n\t")
+    # Collapse multiple newlines
     cleaned = re.sub(r'\n{3,}', '\n\n', cleaned).strip()
     return cleaned
 
-# --- rerank_chunks (Accepts MainConfig) ---
+# --- rerank_chunks (Accepts MainConfig, No changes needed) ---
 def rerank_chunks(query: str, initial_docs: list[tuple], config: MainConfig) -> list[tuple]:
-    # ... (Implementation remains the same as previous corrected Pydantic version) ...
+    """Reranks retrieved document chunks using a CrossEncoder model."""
     global _cross_encoder_instance, _loaded_reranker_model_name
-    if not pydantic_available or not cross_encoder_available or CrossEncoder is None: return initial_docs
+
+    if not pydantic_available:
+        logging.warning("Skipping reranking: Pydantic unavailable.")
+        return initial_docs
+    if not cross_encoder_available or CrossEncoder is None:
+        logging.warning("Skipping reranking: CrossEncoder not available.")
+        return initial_docs
+
     reranker_model_name = config.reranker_model
+    top_k_rerank = config.top_k_rerank # Get k value from config
+
+    # Load or reload model only if needed or changed
     if _cross_encoder_instance is None or _loaded_reranker_model_name != reranker_model_name:
-        _cross_encoder_instance = None
+        _cross_encoder_instance = None # Reset instance
         if reranker_model_name:
-            try: logging.info(f"Loading reranker: {reranker_model_name} on {DEVICE}"); _cross_encoder_instance = CrossEncoder(reranker_model_name, device=DEVICE); _loaded_reranker_model_name = reranker_model_name; logging.info("Loaded reranker.")
-            except Exception as e: logging.error(f"Failed load reranker '{reranker_model_name}': {e}", exc_info=True); _loaded_reranker_model_name = None
-        else: logging.warning("No reranker_model in config."); _loaded_reranker_model_name = None
-    if _cross_encoder_instance is None: logging.warning("Skipping reranking (model issue)."); initial_docs.sort(key=lambda x: float(x[2]) if len(x)>2 else 0.0, reverse=True); return initial_docs
-    if not initial_docs: return []
-    pairs = []; valid_docs = []
+            try:
+                logging.info(f"Loading reranker model: {reranker_model_name} on device: {DEVICE}")
+                _cross_encoder_instance = CrossEncoder(reranker_model_name, device=DEVICE, max_length=512) # Added max_length
+                _loaded_reranker_model_name = reranker_model_name
+                logging.info("Reranker model loaded successfully.")
+            except Exception as e:
+                logging.error(f"Failed to load reranker model '{reranker_model_name}': {e}", exc_info=True)
+                _loaded_reranker_model_name = None # Ensure model name reflects failure
+        else:
+            logging.info("No reranker model specified in configuration.")
+            _loaded_reranker_model_name = None # No model loaded
+
+    # If no model is loaded (either not specified or failed to load), return sorted initial docs
+    if _cross_encoder_instance is None:
+        logging.warning("Skipping reranking step (no valid model loaded). Returning initial documents sorted by original score.")
+        try: # Sort by original score safely
+            initial_docs.sort(key=lambda x: float(x[2]) if len(x) > 2 and isinstance(x[2], (float, int, np.number)) else 0.0, reverse=True)
+        except Exception as sort_e:
+             logging.error(f"Error sorting initial docs by score: {sort_e}")
+        return initial_docs # Return sorted initial list
+
+    if not initial_docs:
+        logging.info("No documents provided for reranking.")
+        return []
+
+    # Prepare pairs for the CrossEncoder: [query, doc_text]
+    pairs = []
+    valid_docs = [] # Keep track of docs corresponding to pairs
     for doc in initial_docs:
-        try: text = doc[1]
-        except IndexError: continue
-        if text and isinstance(text, str): pairs.append([query, text]); valid_docs.append(doc)
-    if not pairs: logging.warning("No valid text for reranking."); return []
-    logging.info(f"Reranking {len(pairs)} docs with {_loaded_reranker_model_name}...")
-    try: scores = _cross_encoder_instance.predict(pairs, show_progress_bar=False)
-    except Exception as e: logging.error(f"Reranker predict fail: {e}", exc_info=True); valid_docs.sort(key=lambda x: float(x[2]) if len(x)>2 else 0.0, reverse=True); return valid_docs
-    reranked = [(valid_docs[i][0], valid_docs[i][1], float(scores[i]) if isinstance(scores[i], (float, int, np.number)) else 0.0) for i in range(len(valid_docs))]
-    reranked.sort(key=lambda x: x[2], reverse=True); top_k_rerank = config.top_k_rerank
-    logging.info(f"Reranking finished. Return top {top_k_rerank}."); return reranked[:top_k_rerank]
+        try:
+            text = doc[1]
+            # Ensure text is a non-empty string before adding
+            if text and isinstance(text, str):
+                pairs.append([query, text])
+                valid_docs.append(doc)
+            else:
+                 logging.warning(f"Skipping document with invalid text for reranking: {doc[0] if doc else 'N/A'}")
+        except IndexError:
+             logging.warning(f"Skipping document with unexpected format for reranking: {doc}")
+             continue
+
+    if not pairs:
+        logging.warning("No valid [query, text] pairs formed for reranking.")
+        return [] # Return empty list if no valid docs found
+
+    logging.info(f"Reranking {len(pairs)} document chunks with model: {_loaded_reranker_model_name}...")
+    try:
+        # Predict scores for the pairs
+        scores = _cross_encoder_instance.predict(pairs, show_progress_bar=False, convert_to_numpy=True) # Get numpy array
+        if not isinstance(scores, np.ndarray): # Ensure scores are numpy array
+             raise TypeError(f"Reranker predict returned unexpected type: {type(scores)}")
+
+    except Exception as e:
+        logging.error(f"Reranker prediction failed: {e}", exc_info=True)
+        # Fallback: return initial docs sorted by original score
+        try:
+            initial_docs.sort(key=lambda x: float(x[2]) if len(x) > 2 and isinstance(x[2], (float, int, np.number)) else 0.0, reverse=True)
+        except Exception as sort_e:
+             logging.error(f"Error sorting initial docs by score during reranker fallback: {sort_e}")
+        return initial_docs
+
+    # Combine original doc info with new scores and sort
+    reranked_results = []
+    for i in range(len(valid_docs)):
+        # Combine (source, text, new_score)
+        # Handle cases where original doc tuple might not have score (index 2)
+        source = valid_docs[i][0] if len(valid_docs[i]) > 0 else "Unknown Source"
+        text = valid_docs[i][1] if len(valid_docs[i]) > 1 else ""
+        new_score = float(scores[i]) # Convert score to float
+        reranked_results.append((source, text, new_score))
+
+    # Sort by the new reranked score in descending order
+    reranked_results.sort(key=lambda x: x[2], reverse=True)
+
+    logging.info(f"Reranking complete. Returning top {top_k_rerank} documents.")
+    # Return only the top_k_rerank results
+    return reranked_results[:top_k_rerank]
 
 
 # --- generate_answer (Accepts MainConfig, CORRECTED dispatch logic) ---
 def generate_answer(
     query: str,
-    retrieved_docs: list[tuple], # Accepts initial docs
-    config: MainConfig,
-    conversation_history=None,
-    partial_callback=None
-):
-    """Generates answer using configured LLM. Handles reranking and prompt formatting."""
-    if not pydantic_available: return "Error: Pydantic config unavailable."
-
-    # --- Step 1: Rerank documents ---
-    try: reranked_docs = rerank_chunks(query, retrieved_docs, config)
-    except Exception as rerank_e:
-        logging.error(f"Error during reranking: {rerank_e}", exc_info=True); reranked_docs = retrieved_docs
-        reranked_docs.sort(key=lambda x: x[2] if len(x)>2 and isinstance(x[2],(float,int)) else 0.0, reverse=True)
-
-    # --- Step 2: Format the prompt ---
-    system_prompt = config.prompt_description or "You are a helpful assistant."
-    try: full_llm_prompt = format_prompt(system_prompt, query, reranked_docs, config)
-    except Exception as format_e: logging.error(f"Error formatting prompt: {format_e}", exc_info=True); return f"Error: Could not format prompt. {format_e}"
-
-    # --- Step 3: Dispatch to the correct LLM provider function (Explicit Args) ---
-    llm_provider = config.llm_provider
-    logging.info(f"Dispatching to LLM provider: {llm_provider}")
-
-    llm_functions = {
-        "openai": _generate_answer_openai, "gpt4all": _generate_answer_gpt4all,
-        "ollama": _generate_answer_ollama, "lm_studio": _generate_answer_lm_studio, "jan": _generate_answer_jan
-    }
-
-    if llm_provider in llm_functions:
-        provider_function = llm_functions[llm_provider]
-        answer = f"Error: Provider '{llm_provider}' dispatch failed."
-        try:
-            # Call each provider function with ONLY the arguments it expects
-            if llm_provider == "lm_studio":
-                answer = provider_function(query=query, context=full_llm_prompt, config=config, partial_callback=partial_callback)
-            elif llm_provider == "openai":
-                answer = provider_function(query=query, context=full_llm_prompt, config=config, conversation_history=conversation_history, partial_callback=partial_callback)
-            elif llm_provider == "gpt4all":
-                answer = provider_function(query=query, context=full_llm_prompt, config=config, partial_callback=partial_callback) # No history
-            elif llm_provider == "ollama":
-                answer = provider_function(query=query, context=full_llm_prompt, config=config, conversation_history=conversation_history, partial_callback=partial_callback)
-            elif llm_provider == "jan":
-                answer = provider_function(query=query, context=full_llm_prompt, config=config, conversation_history=conversation_history, partial_callback=partial_callback)
-            else: logging.error(f"Dispatch logic error for provider: {llm_provider}"); answer = "Error: Dispatch logic failed."
-
-            return clean_llm_response(answer) # Clean final response
-
-        except Exception as provider_e:
-             logging.error(f"Error calling LLM provider '{llm_provider}': {provider_e}", exc_info=True)
-             return f"Error: Failed response from {llm_provider}. Details: {provider_e}"
-    else:
-        logging.error(f"Invalid LLM provider specified in config: {llm_provider}")
-        return f"Error: Invalid LLM provider '{llm_provider}'."
-
-
-def _generate_answer_lm_studio(
-    config: MainConfig,                     # Expected config object
-    context: str,                           # The fully formatted prompt
-    partial_callback: Optional[Callable[[str], None]] = None, # The callback for streaming
-    # --- Add placeholders for arguments passed by the uncorrected dispatcher ---
-    query: Optional[str] = None,            # Will receive 'query', but likely unused here
-    conversation_history: Optional[List[Dict[str, Any]]] = None, # Will receive history, unused here
-    **kwargs # Catch any other unexpected keyword arguments
+    retrieved_docs: list[tuple], # Accepts initial docs from retriever
+    config: MainConfig,          # Requires the validated config object
+    conversation_history: Optional[List[Dict]] = None, # Optional history
+    partial_callback: Optional[Callable[[str], None]] = None # Optional callback for streaming
 ) -> str:
     """
-    Generates an answer using LM Studio's OpenAI-compatible REST API with streaming.
-    NOTE: Accepts extra arguments (query, conversation_history) due to dispatcher
-          passing them, but they are NOT used in constructing the API call itself.
+    Orchestrates answer generation: reranks documents, formats prompt, calls configured LLM provider.
+
+    Args:
+        query: The user's query string.
+        retrieved_docs: List of tuples (source, text, score) from initial retrieval.
+        config: The validated MainConfig object.
+        conversation_history: Optional list of previous messages in OpenAI format.
+        partial_callback: Optional function to call with streaming text chunks.
+
+    Returns:
+        The generated answer string, or an error message.
     """
-    if kwargs: # Log if unexpected arguments are received
-        logging.warning(f"_generate_answer_lm_studio received unexpected keyword arguments: {list(kwargs.keys())}")
+    if not pydantic_available:
+        return "Error: Pydantic configuration system unavailable."
+    if not isinstance(config, MainConfig):
+         return "Error: Invalid configuration object passed to generate_answer."
+
+    # --- Step 1: Rerank documents (if enabled and available) ---
+    try:
+        # Pass the config object to rerank_chunks
+        reranked_docs = rerank_chunks(query, retrieved_docs, config)
+    except Exception as rerank_e:
+        logging.error(f"Error during document reranking: {rerank_e}", exc_info=True)
+        # Fallback: Use original documents, sorted by initial score
+        reranked_docs = retrieved_docs
+        try:
+             reranked_docs.sort(key=lambda x: float(x[2]) if len(x)>2 and isinstance(x[2],(float,int, np.number)) else 0.0, reverse=True)
+        except Exception as sort_e:
+             logging.error(f"Error sorting retrieved docs during rerank fallback: {sort_e}")
+
+    # --- Step 2: Format the prompt ---
+    system_prompt = config.prompt_description or "You are a helpful assistant. Use the provided context to answer the question accurately."
+    try:
+        # Pass the config object to format_prompt
+        full_llm_prompt = format_prompt(system_prompt, query, reranked_docs, config)
+    except Exception as format_e:
+        logging.error(f"Error formatting LLM prompt: {format_e}", exc_info=True)
+        return f"Error: Could not format prompt for LLM. Details: {format_e}"
+
+    # --- Step 3: Dispatch to the correct LLM provider function ---
+    llm_provider = config.llm_provider
+    logging.info(f"Dispatching answer generation to LLM provider: '{llm_provider}'")
+
+    # Dictionary mapping provider name to function
+    llm_functions = {
+        "openai": _generate_answer_openai,
+        "gpt4all": _generate_answer_gpt4all, # Assumes API-based implementation below
+        "ollama": _generate_answer_ollama,
+        "lm_studio": _generate_answer_lm_studio,
+        "jan": _generate_answer_jan
+    }
+
+    provider_function = llm_functions.get(llm_provider)
+
+    if provider_function:
+        answer = f"Error: Provider function '{llm_provider}' failed internally." # Default error
+        try:
+            # --- Call the specific provider function ---
+            # Pass only the arguments expected by that function's signature.
+            # The config object contains all necessary parameters for each provider.
+            # NOTE: We pass the *full formatted prompt* as 'context' to most API functions.
+            if llm_provider == "openai":
+                answer = provider_function(
+                    query=query, # OpenAI function might use original query for history formatting
+                    context=full_llm_prompt,
+                    config=config,
+                    conversation_history=conversation_history,
+                    partial_callback=partial_callback
+                )
+            elif llm_provider == "gpt4all": # Assumes API call function
+                 answer = provider_function(
+                     context=full_llm_prompt, # Pass full prompt
+                     config=config,
+                     partial_callback=partial_callback
+                     # query and history might be passed if function signature accepts them
+                 )
+            elif llm_provider == "ollama":
+                answer = provider_function(
+                    query=query, # Pass original query if needed
+                    context=full_llm_prompt,
+                    config=config,
+                    conversation_history=conversation_history, # Pass history if needed
+                    partial_callback=partial_callback
+                )
+            elif llm_provider == "lm_studio":
+                 answer = provider_function(
+                     context=full_llm_prompt, # Pass full prompt
+                     config=config,
+                     partial_callback=partial_callback
+                     # query and history are ignored by the requests-based function
+                 )
+            elif llm_provider == "jan":
+                 answer = provider_function(
+                     query=query, # Pass original query if needed
+                     context=full_llm_prompt,
+                     config=config,
+                     conversation_history=conversation_history, # Pass history if needed
+                     partial_callback=partial_callback
+                 )
+            else:
+                 # Should not happen if llm_provider is in llm_functions keys
+                 logging.error(f"Internal dispatch logic error for known provider: {llm_provider}")
+                 answer = f"Error: Internal dispatch error for '{llm_provider}'."
+
+            # --- Step 4: Clean the final response ---
+            return clean_llm_response(answer)
+
+        except Exception as provider_e:
+             logging.error(f"Error occurred while calling LLM provider '{llm_provider}': {provider_e}", exc_info=True)
+             return f"Error: Failed to get response from {llm_provider}. Details: {provider_e}"
+    else:
+        # Provider specified in config is not mapped to a function
+        logging.error(f"Invalid or unsupported LLM provider specified in configuration: '{llm_provider}'")
+        return f"Error: Invalid LLM provider configured: '{llm_provider}'."
+
+
+# --- Provider-Specific Functions ---
+
+# _generate_answer_lm_studio (Uses requests, No library needed)
+# Keep the corrected version from previous steps that accepts config object
+# and uses requests to call the API, handling streaming.
+def _generate_answer_lm_studio(
+    config: MainConfig,
+    context: str,
+    partial_callback: Optional[Callable[[str], None]] = None,
+    # --- Add placeholders for arguments passed by the dispatcher, but mark as unused ---
+    query: Optional[str] = None, # Not used in API call construction
+    conversation_history: Optional[List[Dict[str, Any]]] = None, # Not used in API call construction
+    **kwargs # Catch any other unexpected keyword arguments
+) -> str:
+    """Generates answer using LM Studio's OpenAI-compatible API via requests."""
+    if kwargs:
+        logging.warning(f"_generate_answer_lm_studio received unexpected kwargs: {list(kwargs.keys())}")
 
     if not pydantic_available:
-        logging.error("LM Studio generation failed: Pydantic config unavailable.")
+        logging.error("LM Studio: Pydantic unavailable.")
         return "Error: Pydantic config unavailable."
+    if not isinstance(config, MainConfig):
+         logging.error("LM Studio: Invalid config object.")
+         return "Error: Invalid config object."
 
-    # --- Access fields from the provided config object ---
-    base_url = config.lm_studio_server # Use the correct field name 'lm_studio_server'
-    model_name = config.model         # Use the general 'model' field
-    temperature = config.temperature  # Use the general 'temperature' field
-    # Use max_context_tokens as max output tokens, adjust if a separate field exists
+    # Get parameters from config
+    base_url = config.lm_studio_server
+    model_name = config.model # LM Studio needs model identifier
+    temperature = config.temperature
+    # Adjust max_tokens if needed, maybe subtract prompt length approx?
+    # For now, use max_context_tokens as a proxy for max generation length
     max_tokens = config.max_context_tokens
-    system_prompt = config.prompt_description 
-    # --- End config access ---
+    system_prompt = config.prompt_description or "You are a helpful assistant."
 
-    if not model_name:
-        logging.error("LM Studio generation failed: Model name ('model') not configured.")
-        return "Error: LM Studio model name not configured."
-    if not base_url:
-        logging.error("LM Studio generation failed: Base URL ('lm_studio_server') not configured.")
-        return "Error: LM Studio API URL not configured."
+    if not base_url or not model_name:
+        logging.error("LM Studio: Missing 'lm_studio_server' or 'model' in config.")
+        return "Error: LM Studio server URL or model name not configured."
 
-    # Construct the full API URL - Append the standard path
-    # Assuming base_url is like "http://localhost:1234"
     api_url = f"{base_url.rstrip('/')}/v1/chat/completions"
     headers = {"Content-Type": "application/json"}
 
-    # Construct messages payload for the API
-    # Uses the system prompt from config and the pre-formatted 'context' as the user message.
-    # Ignores the 'query' and 'conversation_history' passed to *this function*,
-    # as the relevant info should already be in the 'context' string.
+    # Construct messages payload using the full context (which includes query)
     messages = [
         {"role": "system", "content": system_prompt},
-        {"role": "user", "content": context} # 'context' contains the formatted RAG results + original query
+        {"role": "user", "content": context} # Send the pre-formatted prompt as user message
     ]
-    logging.info(f"Value of partial_callback: {partial_callback}")
-    logging.info(f"Type of partial_callback: {type(partial_callback)}")
-    logging.info(f"bool(partial_callback) evaluates to: {bool(partial_callback)}")
 
-    # Prepare the final JSON payload for the request
     payload = {
-        "model": model_name, # Model identifier for LM Studio
+        "model": model_name,
         "messages": messages,
         "temperature": temperature,
         "max_tokens": max_tokens,
         "stream": bool(partial_callback)
     }
-    logging.info(f"Sending payload with stream set to: {payload['stream']}") # Log the actual value being sent
-    # Remove None values from payload if necessary (e.g., if max_tokens could be None)
-    payload = {k: v for k, v in payload.items() if v is not None}
+    payload = {k: v for k, v in payload.items() if v is not None} # Clean None values
 
-    logging.info(f"Sending request to LM Studio API: {api_url} | Model: {model_name} | Temp: {temperature} | Max Tokens: {max_tokens} | Streaming: {payload['stream']}")
-    # logging.debug(f"LM Studio Payload: {json.dumps(payload, indent=2)}") # Optional: Log full payload for debugging
+    logging.info(f"Sending request to LM Studio API: {api_url} | Model: {model_name} | Streaming: {payload['stream']}")
+    # logging.debug(f"LM Studio Payload: {json.dumps(payload, indent=2)}") # Uncomment for deep debugging
 
     complete_response = ""
     try:
         response = requests.post(
-            api_url,
-            headers=headers,
-            json=payload,
-            stream=payload["stream"], # Pass stream=True to requests if streaming
-            timeout=180 # Consider making timeout configurable via MainConfig
+            api_url, headers=headers, json=payload, stream=payload["stream"],
+            timeout=180 # Consider config
         )
-        response.raise_for_status() # Check for HTTP errors (4xx, 5xx)
+        response.raise_for_status()
 
         if payload["stream"]:
             logging.debug("Streaming response from LM Studio...")
+            # --- Standard SSE Processing Logic ---
             for line in response.iter_lines():
                 if line:
                     decoded_line = line.decode('utf-8')
                     if decoded_line.startswith('data: '):
                         json_str = decoded_line[len('data: '):].strip()
-                        if json_str == '[DONE]':
-                            logging.debug("LM Studio stream finished ([DONE] received).")
-                            break
-
-                        # --- Add Robust JSON Parsing ---
+                        if json_str == '[DONE]': break
                         try:
-                            # Attempt to parse the data as JSON
                             chunk_data = json.loads(json_str)
-
-                            # Ensure chunk_data is a dictionary before proceeding
-                            if not isinstance(chunk_data, dict):
-                                logging.warning(f"LM Studio stream: Expected JSON dict, got {type(chunk_data)}: {json_str}")
-                                continue # Skip this chunk
-
-                            # Extract the content delta safely
                             delta = chunk_data.get("choices", [{}])[0].get("delta", {})
                             content_chunk = delta.get("content")
-
-                            if content_chunk: # Ensure there is content in the chunk
+                            if content_chunk:
                                 complete_response += content_chunk
                                 if partial_callback:
-                                    try:
-                                        partial_callback(content_chunk)
-                                    except Exception as cb_err:
-                                        logging.error(f"Error in partial_callback: {cb_err}", exc_info=True)
-
-                        except json.JSONDecodeError:
-                            # Log if the data wasn't valid JSON - could be an error message
-                            logging.warning(f"LM Studio stream: Received non-JSON data: {json_str}")
-                            # Optionally, treat this as an error and stop, or just log and continue
-                            # If it's an error message like "Model crashed", maybe stop?
-                            if "crashed" in json_str or "unloaded" in json_str:
-                                 logging.error(f"LM Studio reported error during stream: {json_str}")
-                                 # You might want to return an error message here or raise an exception
-                                 # For now, let's break the loop and return what we have + error marker
-                                 complete_response += f"\n\n[LLM Error: {json_str}]"
-                                 break # Stop processing the stream
-                            continue # Skip this line if it's not JSON and not a critical error
-
-                        except Exception as e:
-                            # Catch other potential errors during dictionary access
-                            logging.error(f"Error processing LM Studio stream chunk: {e} - JSON String: {json_str}", exc_info=True)
-                        # --- End Robust JSON Parsing ---
-
-            logging.info("Finished streaming response from LM Studio.")
-        else: # Handle non-streaming response
+                                    try: partial_callback(content_chunk)
+                                    except Exception as cb_err: logging.error(f"Error in partial_callback (LM Studio): {cb_err}", exc_info=True)
+                        except json.JSONDecodeError: logging.warning(f"LM Studio stream: Invalid JSON skipped: {json_str}")
+                        except Exception as e: logging.error(f"Error processing LM Studio chunk: {e} - JSON: {json_str}", exc_info=True)
+            # --- End SSE Processing ---
+            logging.info("Finished streaming from LM Studio.")
+        else: # Non-streaming
             json_response = response.json()
-            # Extract full response content safely
-            if 'choices' in json_response and json_response['choices']:
-                 message = json_response['choices'][0].get('message', {})
-                 complete_response = message.get('content', "")
-            else:
-                 logging.warning(f"LM Studio non-stream response missing expected structure: {json_response}")
-                 complete_response = str(json_response) # Fallback to string representation
+            message = json_response.get('choices', [{}])[0].get('message', {})
+            complete_response = message.get('content', "")
             logging.info("Received non-streaming response from LM Studio.")
 
-        # Return the complete response (cleaning is handled by the caller 'generate_answer')
         return complete_response
 
+    # --- Error Handling ---
     except requests.exceptions.Timeout:
-        logging.error(f"LM Studio API request timed out connecting to {api_url}")
+        logging.error(f"LM Studio API request timed out: {api_url}")
         return "Error: Request to LM Studio timed out."
     except requests.exceptions.ConnectionError:
-        logging.error(f"LM Studio API connection error to {api_url}. Is the server running at {base_url}?")
-        return f"Error: Cannot connect to LM Studio at {base_url}. Please ensure it's running and the URL is correct."
+        logging.error(f"LM Studio API connection error: {api_url}. Is server running?")
+        return f"Error: Cannot connect to LM Studio at {base_url}."
     except requests.exceptions.RequestException as e:
-        status_code = e.response.status_code if e.response is not None else "N/A"
-        response_text = ""
-        if e.response is not None:
-            try: response_text = e.response.text
-            except Exception: response_text = "(Could not decode response text)"
-        logging.error(f"LM Studio API request failed: {e} (Status: {status_code})", exc_info=True)
-        logging.error(f"LM Studio Response Detail: {response_text[:500]}") # Log first 500 chars
-        return f"Error: LM Studio API request failed (Status {status_code}). Details: {response_text[:200]}" # Limit detail length in returned error
+        status = e.response.status_code if e.response is not None else "N/A"
+        resp_text = e.response.text[:500] if e.response is not None else "N/A"
+        logging.error(f"LM Studio API request failed: {e} (Status: {status}) Response: {resp_text}", exc_info=True)
+        return f"Error: LM Studio API request failed (Status {status})."
     except Exception as e:
-        logging.error(f"An unexpected error occurred during LM Studio generation: {e}", exc_info=True)
-        return "Error: An unexpected error occurred while communicating with LM Studio."
-
-def _generate_answer_openai(query: str, context: str, config: MainConfig, conversation_history, partial_callback=None):
-    # ... (Implementation remains the same, accessing config attributes) ...
-    if not pydantic_available: return "Error: Pydantic unavailable."
-    try: from openai import OpenAI
-    except ImportError: return "Error: openai library not found."
-    try:
-        api_key_to_use = os.environ.get("OPENAI_API_KEY"); client = OpenAI(api_key=api_key_to_use)
-        model = config.model
-        if not model: return "Error: OpenAI model ('model') missing."
-        messages = []
-        if conversation_history: messages.extend(conversation_history)
-        messages.append({"role": "user", "content": context})
-        logging.info(f"Sending request to OpenAI model: {model}")
-        # TODO: Add streaming support
-        response = client.chat.completions.create(model=model, messages=messages)
-        answer = response.choices[0].message.content; logging.info("Received response from OpenAI."); return answer
-    except Exception as e: logging.exception("OpenAI Error"); return f"Error processing OpenAI: {e}"
+        logging.error(f"Unexpected error during LM Studio generation: {e}", exc_info=True)
+        return "Error: Unexpected error communicating with LM Studio."
 
 
-def _generate_answer_gpt4all( # Keep the same function name for the dispatcher
+# _generate_answer_openai (Uses 'openai' library)
+# Keep this as is if direct OpenAI usage is intended for this provider key
+def _generate_answer_openai(
+    query: str,
     context: str,
     config: MainConfig,
+    conversation_history: Optional[List[Dict]] = None,
+    partial_callback: Optional[Callable[[str], None]] = None
+) -> str:
+    """Generates an answer using the OpenAI API."""
+    if not pydantic_available: return "Error: Pydantic unavailable."
+    try:
+        from openai import OpenAI, APIConnectionError, APITimeoutError, OpenAIError
+    except ImportError:
+        logging.error("OpenAI library not found. Please install it: pip install openai")
+        return "Error: openai library not found."
+
+    try:
+        # Use API key from config first, then environment variable
+        api_key_to_use = config.api_key or os.environ.get("OPENAI_API_KEY")
+        if not api_key_to_use:
+             logging.error("OpenAI API key not found in config ('api_key') or environment variable 'OPENAI_API_KEY'.")
+             return "Error: OpenAI API key not configured."
+
+        client = OpenAI(api_key=api_key_to_use)
+        model_name = config.model # Use the general model field
+        if not model_name:
+            logging.error("OpenAI model name ('model') not specified in config.")
+            return "Error: OpenAI model name not configured."
+
+        # Construct messages - Use pre-formatted context as the user message
+        messages = []
+        # Prepend system prompt if provided
+        if config.prompt_description:
+             messages.append({"role": "system", "content": config.prompt_description})
+        # Add conversation history if provided (ensure format is correct)
+        if conversation_history:
+            # Validate/transform history format if necessary
+            messages.extend(conversation_history)
+        # Add the current user message (which contains context + original query)
+        messages.append({"role": "user", "content": context})
+
+        logging.info(f"Sending request to OpenAI API. Model: {model_name} | Streaming: {bool(partial_callback)}")
+        # logging.debug(f"OpenAI Payload Messages: {messages}") # Optional detailed log
+
+        complete_response = ""
+        if partial_callback: # Streaming
+            stream = client.chat.completions.create(
+                model=model_name,
+                messages=messages,
+                temperature=config.temperature,
+                max_tokens=config.max_context_tokens, # Adjust if needed
+                stream=True
+            )
+            logging.debug("Streaming response from OpenAI...")
+            for chunk in stream:
+                content_chunk = chunk.choices[0].delta.content
+                if content_chunk is not None:
+                    complete_response += content_chunk
+                    try:
+                        partial_callback(content_chunk)
+                    except Exception as cb_err:
+                        logging.error(f"Error in partial_callback (OpenAI): {cb_err}", exc_info=True)
+            logging.info("Finished streaming response from OpenAI.")
+        else: # Non-streaming
+            response = client.chat.completions.create(
+                model=model_name,
+                messages=messages,
+                temperature=config.temperature,
+                max_tokens=config.max_context_tokens # Adjust if needed
+            )
+            complete_response = response.choices[0].message.content
+            logging.info("Received non-streaming response from OpenAI.")
+
+        return complete_response
+
+    except APIConnectionError as e:
+        logging.error(f"OpenAI API connection error: {e}", exc_info=True)
+        return f"Error: Cannot connect to OpenAI API: {e}"
+    except APITimeoutError as e:
+         logging.error(f"OpenAI API request timed out: {e}", exc_info=True)
+         return f"Error: OpenAI API request timed out."
+    except OpenAIError as e: # Catch other OpenAI specific errors
+        logging.error(f"OpenAI API error: {e} (Status: {e.http_status})", exc_info=True)
+        return f"Error: OpenAI API returned an error (Status: {e.http_status}). Details: {e.body}"
+    except Exception as e:
+        logging.error(f"Unexpected error during OpenAI generation: {e}", exc_info=True)
+        return f"Error: Unexpected error processing OpenAI request: {e}"
+
+
+# _generate_answer_gpt4all (Uses requests, No library needed)
+# Keep the corrected version from previous steps that accepts config object
+# and uses requests to call the API, handling streaming.
+# Ensure config_models.py has 'gpt4all_api_url' field in MainConfig
+def _generate_answer_gpt4all(
+    config: MainConfig,
+    context: str,
     partial_callback: Optional[Callable[[str], None]] = None,
-    # Add placeholders if the dispatcher still passes them (adjust as needed)
+    # --- Add placeholders if needed ---
     query: Optional[str] = None,
     conversation_history: Optional[List[Dict[str, Any]]] = None,
     **kwargs
 ) -> str:
-    """
-    Generates an answer using the GPT4All API Server (OpenAI-compatible endpoint)
-    via HTTP requests, supporting streaming.
-    """
+    """Generates an answer using a GPT4All compatible API Server via requests."""
     if kwargs:
-        logging.warning(f"_generate_answer_gpt4all received unexpected args: {list(kwargs.keys())}")
+        logging.warning(f"_generate_answer_gpt4all received unexpected kwargs: {list(kwargs.keys())}")
 
     if not pydantic_available:
-        logging.error("GPT4All API generation failed: Pydantic config unavailable.")
+        logging.error("GPT4All API: Pydantic unavailable.")
         return "Error: Pydantic unavailable."
+    if not isinstance(config, MainConfig):
+         logging.error("GPT4All API: Invalid config object.")
+         return "Error: Invalid config object."
 
-    # --- Get config for the API Server ---
-    api_base_url = config.gpt4all_api_url # Use the new field name
-    # Model name might be specified in config, but GPT4All server often uses the model currently loaded in the UI
-    model_name = config.model
+    # Get parameters from config
+    # ASSUMPTION: config_models.py has 'gpt4all_api_url: Optional[str]'
+    api_base_url = getattr(config, 'gpt4all_api_url', None) # Safely get attribute
+    model_name = config.model # Informational, server likely uses loaded model
     temperature = config.temperature
-    max_tokens = config.max_context_tokens # Use general config field
+    max_tokens = config.max_context_tokens
     system_prompt = config.prompt_description or "You are a helpful assistant."
-    # --- End config access ---
 
     if not api_base_url:
-        logging.error("GPT4All API Server URL ('gpt4all_api_url') not configured.")
+        logging.error("GPT4All API: Missing 'gpt4all_api_url' in config.")
         return "Error: GPT4All API Server URL not configured."
 
-    # Construct the full API endpoint URL
-    api_url = f"{api_base_url.rstrip('/')}/chat/completions" # Standard OpenAI path
+    api_url = f"{api_base_url.rstrip('/')}/v1/chat/completions" # Standard path
     headers = {"Content-Type": "application/json"}
 
-    # Prepare the messages payload for the API
     messages = [
         {"role": "system", "content": system_prompt},
-        {"role": "user", "content": context} # Send the full formatted context
-        # Include conversation history if needed and supported by the API
-        # if conversation_history: messages.extend(conversation_history) # Ensure format matches API spec
+        {"role": "user", "content": context}
     ]
+    # Add history if supported by the specific server implementation
+    # if conversation_history: messages.extend(conversation_history)
 
-    # Prepare the final JSON payload
     payload = {
-        # The model name might be informational; server typically uses the loaded model.
-        "model": model_name or "gpt4all-model", # Provide a default/placeholder if None
+        "model": model_name or "gpt4all-default", # Provide placeholder if None
         "messages": messages,
         "temperature": temperature,
         "max_tokens": max_tokens,
-        "stream": bool(partial_callback) # Enable streaming if callback provided
+        "stream": bool(partial_callback)
     }
-    # Remove keys with None values if the API doesn't handle them gracefully
     payload = {k: v for k, v in payload.items() if v is not None}
 
-    logging.info(f"Sending request to GPT4All API Server: {api_url} | Model: {payload.get('model')} | Temp: {temperature} | Max Tokens: {max_tokens} | Streaming: {payload['stream']}")
+    logging.info(f"Sending request to GPT4All API: {api_url} | Model: {payload.get('model')} | Streaming: {payload['stream']}")
+    # logging.debug(f"GPT4All Payload: {json.dumps(payload, indent=2)}")
 
     complete_response = ""
     try:
-        # Make the HTTP POST request
         response = requests.post(
-            api_url,
-            headers=headers,
-            json=payload,
-            stream=payload["stream"], # Pass stream=True to requests if streaming
-            timeout=180 # Consider making timeout configurable
+            api_url, headers=headers, json=payload, stream=payload["stream"],
+            timeout=180 # Consider config
         )
-        response.raise_for_status() # Raise HTTPError for bad responses (4xx or 5xx)
+        response.raise_for_status()
 
-        # Process the response (Streaming or Non-Streaming)
         if payload["stream"]:
-            logging.debug("Streaming response from GPT4All API Server...")
-            # --- Standard SSE Processing Logic (same as LM Studio) ---
+            logging.debug("Streaming response from GPT4All API...")
+            # --- Standard SSE Processing Logic ---
             for line in response.iter_lines():
-                if line:
-                    decoded_line = line.decode('utf-8')
-                    if decoded_line.startswith('data: '):
-                        json_str = decoded_line[len('data: '):].strip()
-                        if json_str == '[DONE]':
-                            logging.debug("GPT4All API Server stream finished ([DONE]).")
-                            break
-                        try:
-                            chunk_data = json.loads(json_str)
-                            delta = chunk_data.get("choices", [{}])[0].get("delta", {})
-                            content_chunk = delta.get("content")
-                            if content_chunk: # Ensure content exists
-                                complete_response += content_chunk
-                                if partial_callback:
-                                    try:
-                                        partial_callback(content_chunk) # Call the provided callback
-                                    except Exception as cb_err:
-                                        logging.error(f"Error in partial_callback (GPT4All): {cb_err}", exc_info=True)
-                        except json.JSONDecodeError:
-                            logging.warning(f"GPT4All API stream: Invalid JSON line skipped: {decoded_line}")
-                        except Exception as e:
-                            logging.error(f"Error processing GPT4All API stream chunk: {e} - Line: {decoded_line}", exc_info=True)
-            logging.info("Finished streaming response from GPT4All API Server.")
+                 if line:
+                     decoded_line = line.decode('utf-8')
+                     if decoded_line.startswith('data: '):
+                         json_str = decoded_line[len('data: '):].strip()
+                         if json_str == '[DONE]': break
+                         try:
+                             chunk_data = json.loads(json_str)
+                             delta = chunk_data.get("choices", [{}])[0].get("delta", {})
+                             content_chunk = delta.get("content")
+                             if content_chunk:
+                                 complete_response += content_chunk
+                                 if partial_callback:
+                                     try: partial_callback(content_chunk)
+                                     except Exception as cb_err: logging.error(f"Error in partial_callback (GPT4All API): {cb_err}", exc_info=True)
+                         except json.JSONDecodeError: logging.warning(f"GPT4All API stream: Invalid JSON skipped: {json_str}")
+                         except Exception as e: logging.error(f"Error processing GPT4All API chunk: {e} - JSON: {json_str}", exc_info=True)
             # --- End SSE Processing ---
-        else: # Handle non-streaming response
+            logging.info("Finished streaming from GPT4All API.")
+        else: # Non-streaming
             json_response = response.json()
-            if 'choices' in json_response and json_response['choices']:
-                 message = json_response['choices'][0].get('message', {})
-                 complete_response = message.get('content', "")
-            else:
-                 logging.warning(f"GPT4All API Server non-stream response missing expected structure: {json_response}")
-                 complete_response = str(json_response) # Fallback
-            logging.info("Received non-streaming response from GPT4All API Server.")
+            message = json_response.get('choices', [{}])[0].get('message', {})
+            complete_response = message.get('content', "")
+            logging.info("Received non-streaming response from GPT4All API.")
 
-        # Return the complete response (cleaning is handled by the caller 'generate_answer')
         return complete_response
 
     # --- Error Handling (similar to LM Studio) ---
     except requests.exceptions.Timeout:
-        logging.error(f"GPT4All API Server request timed out to {api_url}")
-        return "Error: Request to GPT4All API Server timed out."
+        logging.error(f"GPT4All API request timed out: {api_url}")
+        return "Error: Request to GPT4All API timed out."
     except requests.exceptions.ConnectionError:
-        logging.error(f"GPT4All API Server connection error to {api_url}. Is the server running at {api_base_url}?")
-        return f"Error: Cannot connect to GPT4All API Server at {api_base_url}. Please ensure it's running and the URL is correct."
+        logging.error(f"GPT4All API connection error: {api_url}. Is server running?")
+        return f"Error: Cannot connect to GPT4All API Server at {api_base_url}."
     except requests.exceptions.RequestException as e:
-        status_code = e.response.status_code if e.response is not None else "N/A"
-        response_text = ""
-        if e.response is not None:
-            try: response_text = e.response.text
-            except Exception: response_text = "(Could not decode response text)"
-        logging.error(f"GPT4All API Server request failed: {e} (Status: {status_code})", exc_info=True)
-        logging.error(f"GPT4All API Server Response Detail: {response_text[:500]}") # Log first 500 chars
-        return f"Error: GPT4All API Server request failed (Status {status_code}). Details: {response_text[:200]}"
+        status = e.response.status_code if e.response is not None else "N/A"
+        resp_text = e.response.text[:500] if e.response is not None else "N/A"
+        logging.error(f"GPT4All API request failed: {e} (Status: {status}) Response: {resp_text}", exc_info=True)
+        return f"Error: GPT4All API request failed (Status {status})."
     except Exception as e:
-        logging.error(f"An unexpected error occurred during GPT4All API Server generation: {e}", exc_info=True)
-        return "Error: An unexpected error occurred while communicating with GPT4All API Server."
-
-# --- Don't forget to update the dispatcher in `generate_answer` if needed ---
-# Make sure the call within generate_answer passes the correct arguments
-# for gpt4all provider, matching the signature above. Example:
-#
-# elif llm_provider == "gpt4all":
-#     answer = provider_function(
-#         context=provider_args["context"],
-#         config=provider_args["config"],
-#         partial_callback=provider_args["partial_callback"]
-#         # query=provider_args["query"], # Pass if signature includes it
-#         # conversation_history=provider_args["conversation_history"] # Pass if signature includes it
-#     )
-
-# def _generate_answer_gpt4all(query: str, context: str, config: MainConfig, partial_callback=None):
-#     if not pydantic_available:
-#         return "Error: Pydantic unavailable."
-
-#     try:
-#         from gpt4all import GPT4All
-#     except ImportError:
-#         return "Error: gpt4all library not found."
-
-#     try:
-#         model_path_obj = config.gpt4all_model_path
-#         if not model_path_obj:
-#             return "Error: GPT4All path missing."
-
-#         model_path_str = str(model_path_obj)
-#         if not os.path.exists(model_path_str):
-#             return f"Error: GPT4All model not found: {model_path_str}"
-
-#         logging.info(f"Loading GPT4All model: {model_path_str} on {DEVICE}")
-#         gpt4all = GPT4All(model_path_str, device=DEVICE)
-
-#         max_tokens_gen = config.max_context_tokens
-#         logging.info("Generating response GPT4All...")
-
-#         tokens = []
-
-#         def _stream_fn(token):
-#             tokens.append(token)
-#             if partial_callback:
-#                 partial_callback(token)
-
-#         start = time.perf_counter()
-#         with gpt4all.chat_session():
-#             gpt4all.generate(context, max_tokens=max_tokens_gen, streaming=True, callback=_stream_fn)
-#         duration = time.perf_counter() - start
-#         logging.info(f"GPT4All response received in {duration:.2f} seconds.")
-#         return ''.join(tokens)
-
-#     except Exception as e:
-#         logging.exception("GPT4All Error")
-#         return f"Error processing GPT4All: {e}"
+        logging.error(f"Unexpected error during GPT4All API generation: {e}", exc_info=True)
+        return "Error: Unexpected error communicating with GPT4All API Server."
 
 
-def _generate_answer_ollama(query: str, context: str, config: MainConfig, conversation_history=None, partial_callback=None):
-    # Access config attributes directly
+# _generate_answer_ollama (Uses requests, No library needed)
+# Keep the version using requests, ensuring it takes config object
+def _generate_answer_ollama(
+    query: str,
+    context: str,
+    config: MainConfig,
+    conversation_history: Optional[List[Dict]] = None,
+    partial_callback: Optional[Callable[[str], None]] = None
+) -> str:
+    """Generates an answer using the Ollama API via requests."""
     if not pydantic_available: return "Error: Pydantic unavailable."
-    try:
-        server_url = config.ollama_server # Use attribute
-        model = config.model         # Use attribute
-        if not model: return "Error: Ollama model ('model') missing."
+    if not isinstance(config, MainConfig): return "Error: Invalid config object."
 
-        # Construct payload for Ollama API
-        payload = {
-            "model": model,
-            "prompt": context, # context contains the fully formatted prompt
-            "stream": bool(partial_callback) # Set stream based on callback presence
+    server_url = config.ollama_server
+    model_name = config.model
+    temperature = config.temperature # Ollama supports temperature
+    # Ollama options can control context length, but max_tokens isn't standard top-level param
+    # Check Ollama docs for parameters like 'num_ctx', 'num_predict' if needed
+    # max_tokens = config.max_context_tokens
+
+    if not server_url or not model_name:
+         logging.error("Ollama: Missing 'ollama_server' or 'model' in config.")
+         return "Error: Ollama server URL or model name not configured."
+
+    api_url = f"{server_url.rstrip('/')}/api/generate"
+    headers = {"Content-Type": "application/json"}
+
+    # Construct payload for Ollama API
+    payload = {
+        "model": model_name,
+        "prompt": context, # Send the full formatted prompt
+        "stream": bool(partial_callback),
+        "options": { # Ollama uses an 'options' dictionary
+            "temperature": temperature,
+            # "num_predict": max_tokens # Example: Control max generation length
+            # "num_ctx": 4096 # Example: Control context window size
         }
-        # TODO: Add conversation_history to payload if Ollama API supports it
-        # Example (syntax depends on Ollama version):
-        # if conversation_history:
-        #    payload["messages"] = conversation_history # Or adapt format
+        # Add system prompt if supported by specific model/Ollama version
+        # "system": config.prompt_description or "You are a helpful assistant."
+    }
 
-        logging.info(f"Sending request Ollama: {server_url} model: {model}")
+    # Add conversation history if supported/needed
+    # The format might differ, check Ollama documentation
+    # if conversation_history: payload["messages"] = conversation_history # Example
+
+    logging.info(f"Sending request to Ollama API: {api_url} | Model: {model_name} | Streaming: {payload['stream']}")
+    # logging.debug(f"Ollama Payload: {json.dumps(payload, indent=2)}")
+
+    complete_response = ""
+    try:
         response = requests.post(
-            f"{server_url}/api/generate",
-            json=payload,
-            timeout=180, # Consider making timeout configurable
-            stream=bool(partial_callback) # requests stream arg
+            api_url, headers=headers, json=payload, stream=payload["stream"],
+            timeout=180 # Consider config
         )
-        response.raise_for_status() # Raise HTTPError for bad responses (4xx or 5xx)
+        response.raise_for_status()
 
-        complete_response = ""
-        if partial_callback:
-             # Handle streaming response line by line
-             logging.debug("Streaming Ollama response...")
-             for line in response.iter_lines(decode_unicode=True):
+        if payload["stream"]:
+            logging.debug("Streaming Ollama response...")
+            # Ollama streaming returns JSON objects line by line
+            for line in response.iter_lines(decode_unicode=True):
                  if line:
                      try:
                          data = json.loads(line)
-                         chunk = data.get("response", "") # Extract content chunk
+                         chunk = data.get("response", "") # Key is 'response' for content
                          complete_response += chunk
-                         partial_callback(chunk) # Emit partial response
+                         if partial_callback:
+                             try: partial_callback(chunk)
+                             except Exception as cb_err: logging.error(f"Error in partial_callback (Ollama): {cb_err}", exc_info=True)
                          # Check Ollama's stream termination flag
                          if data.get("done"):
                              logging.debug("Ollama stream 'done' flag received.")
                              break
                      except json.JSONDecodeError:
                          logging.warning(f"Ollama stream: Invalid JSON line skipped: {line}")
-                         continue # Skip malformed JSON lines
-        else:
-             # Handle non-streaming response
+                     except Exception as e:
+                          logging.error(f"Error processing Ollama chunk: {e} - Line: {line}", exc_info=True)
+            logging.info("Finished streaming response from Ollama.")
+        else: # Non-streaming
              json_response = response.json()
-             complete_response = json_response.get("response", "") # Extract full response
+             complete_response = json_response.get("response", "") # Key is 'response'
+             logging.info("Received non-streaming response from Ollama.")
 
-        logging.info("Received response from Ollama.")
-        # Cleaning is handled by the caller (generate_answer)
         return complete_response
 
+    # --- Error Handling ---
+    except requests.exceptions.Timeout:
+        logging.error(f"Ollama API request timed out: {api_url}")
+        return "Error: Request to Ollama timed out."
+    except requests.exceptions.ConnectionError:
+        logging.error(f"Ollama API connection error: {api_url}. Is Ollama service running?")
+        return f"Error: Cannot connect to Ollama at {server_url}."
     except requests.exceptions.RequestException as e:
-        logging.exception("Ollama connection/request error")
-        return f"Error connecting to Ollama: {e}"
+        status = e.response.status_code if e.response is not None else "N/A"
+        resp_text = e.response.text[:500] if e.response is not None else "N/A"
+        logging.error(f"Ollama API request failed: {e} (Status: {status}) Response: {resp_text}", exc_info=True)
+        return f"Error: Ollama API request failed (Status {status})."
     except Exception as e:
-        logging.exception("Ollama Error")
-        return f"Error processing with Ollama: {e}"
+        logging.error(f"Unexpected error during Ollama generation: {e}", exc_info=True)
+        return f"Error: Unexpected error processing with Ollama: {e}"
 
-def _generate_answer_jan(query: str, context: str, config: MainConfig, conversation_history=None, partial_callback=None):
-    # ... (Implementation remains the same, accessing config attributes) ...
+
+# _generate_answer_jan (Uses requests, No library needed)
+# Keep the version using requests, ensuring it takes config object
+def _generate_answer_jan(
+    query: str,
+    context: str,
+    config: MainConfig,
+    conversation_history: Optional[List[Dict]] = None,
+    partial_callback: Optional[Callable[[str], None]] = None
+) -> str:
+    """Generates an answer using the Jan API Server via requests."""
     if not pydantic_available: return "Error: Pydantic unavailable."
+    if not isinstance(config, MainConfig): return "Error: Invalid config object."
+
+    server_url = config.jan_server
+    model_name = config.model # Jan needs model identifier
+    temperature = config.temperature
+    max_tokens = config.max_context_tokens
+    system_prompt = config.prompt_description or "You are a helpful assistant."
+
+    if not server_url or not model_name:
+        logging.error("Jan: Missing 'jan_server' or 'model' in config.")
+        return "Error: Jan server URL or model name not configured."
+
+    # Assume Jan uses OpenAI compatible endpoint
+    api_url = f"{server_url.rstrip('/')}/v1/chat/completions"
+    headers = {"Content-Type": "application/json"}
+
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": context} # Send full formatted prompt
+    ]
+    if conversation_history:
+        messages.extend(conversation_history) # Add history if applicable
+
+    payload = {
+        "model": model_name,
+        "messages": messages,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        "stream": bool(partial_callback)
+    }
+    payload = {k: v for k, v in payload.items() if v is not None}
+
+    logging.info(f"Sending request to Jan API: {api_url} | Model: {model_name} | Streaming: {payload['stream']}")
+    # logging.debug(f"Jan Payload: {json.dumps(payload, indent=2)}")
+
+    complete_response = ""
     try:
-        server_url = config.jan_server; model = config.model
-        if not model: return "Error: Jan model ('model') missing."
-        endpoint = f"{server_url}/v1/chat/completions"; headers = {"Content-Type": "application/json"}; messages = []
-        if conversation_history: messages.extend(conversation_history)
-        messages.append({"role": "user", "content": context})
-        max_tokens_gen = config.max_context_tokens; temperature = getattr(config, 'temperature', 0.7)
-        data = { "model": model, "messages": messages, "stream": bool(partial_callback), "max_tokens": max_tokens_gen, "temperature": temperature }
-        logging.info(f"Sending request Jan: {endpoint} model: {model}"); response = requests.post(endpoint, headers=headers, json=data, stream=bool(partial_callback), timeout=180); response.raise_for_status()
-        complete_response = ""
-        if partial_callback:
-            logging.debug("Streaming Jan...")
+        response = requests.post(
+            api_url, headers=headers, json=payload, stream=payload["stream"],
+            timeout=180 # Consider config
+        )
+        response.raise_for_status()
+
+        if payload["stream"]:
+            logging.debug("Streaming response from Jan API...")
+            # --- Standard SSE Processing Logic (same as LM Studio) ---
             for line in response.iter_lines():
-                 if line:
-                     decoded_line = line.decode('utf-8')
-                     if decoded_line.startswith('data: '): # Check for SSE prefix
-                         try:
-                             json_str = decoded_line.split('data: ', 1)[1]
-                             if json_str.strip() == '[DONE]': break # Check for termination signal
-                             json_data = json.loads(json_str)
-                             # Extract content delta safely
-                             if 'choices' in json_data and json_data['choices']:
-                                  delta = json_data['choices'][0].get('delta', {})
-                                  content = delta.get('content', '')
-                                  if content: # Ensure there's content before processing
-                                      complete_response += content # Build full response
-                                      partial_callback(content) # Emit chunk
-                         except json.JSONDecodeError:
-                             logging.warning(f"Jan stream: Invalid JSON line skipped: {decoded_line}")
-                             continue # Skip malformed lines
-        else: # Non-streaming case
-             json_response = response.json()
-             # Extract full response content safely
-             if 'choices' in json_response and json_response['choices']:
-                 message = json_response['choices'][0].get('message', {})
-                 complete_response = message.get('content', "")
+                if line:
+                    decoded_line = line.decode('utf-8')
+                    if decoded_line.startswith('data: '):
+                        json_str = decoded_line[len('data: '):].strip()
+                        if json_str == '[DONE]': break
+                        try:
+                            chunk_data = json.loads(json_str)
+                            delta = chunk_data.get("choices", [{}])[0].get("delta", {})
+                            content_chunk = delta.get("content")
+                            if content_chunk:
+                                complete_response += content_chunk
+                                if partial_callback:
+                                    try: partial_callback(content_chunk)
+                                    except Exception as cb_err: logging.error(f"Error in partial_callback (Jan): {cb_err}", exc_info=True)
+                        except json.JSONDecodeError: logging.warning(f"Jan API stream: Invalid JSON skipped: {json_str}")
+                        except Exception as e: logging.error(f"Error processing Jan API chunk: {e} - JSON: {json_str}", exc_info=True)
+            # --- End SSE Processing ---
+            logging.info("Finished streaming from Jan API.")
+        else: # Non-streaming
+            json_response = response.json()
+            message = json_response.get('choices', [{}])[0].get('message', {})
+            complete_response = message.get('content', "")
+            logging.info("Received non-streaming response from Jan API.")
 
-        logging.info("Received response from Jan."); return complete_response
-    except requests.exceptions.RequestException as e: logging.exception("Jan connection error"); return f"Error connecting Jan: {e}"
-    except Exception as e: logging.exception("Jan Error"); return f"Error processing Jan: {e}"
+        return complete_response
 
-# --- load_provider_modules (Accepts MainConfig) ---
+    # --- Error Handling (similar to LM Studio) ---
+    except requests.exceptions.Timeout:
+        logging.error(f"Jan API request timed out: {api_url}")
+        return "Error: Request to Jan API timed out."
+    except requests.exceptions.ConnectionError:
+        logging.error(f"Jan API connection error: {api_url}. Is Jan server running?")
+        return f"Error: Cannot connect to Jan server at {server_url}."
+    except requests.exceptions.RequestException as e:
+        status = e.response.status_code if e.response is not None else "N/A"
+        resp_text = e.response.text[:500] if e.response is not None else "N/A"
+        logging.error(f"Jan API request failed: {e} (Status: {status}) Response: {resp_text}", exc_info=True)
+        return f"Error: Jan API request failed (Status {status})."
+    except Exception as e:
+        logging.error(f"Unexpected error during Jan API generation: {e}", exc_info=True)
+        return "Error: Unexpected error communicating with Jan server."
+
+
+# --- load_provider_modules (UPDATED: Reflects API-based interaction) ---
 def load_provider_modules(config: MainConfig) -> bool:
-    # ... (Implementation remains the same, accessing config.llm_provider) ...
-    if not pydantic_available: logging.error("Cannot check modules: Pydantic unavailable."); return False
-    provider = config.llm_provider; modules_ok = True; logging.info(f"Checking modules for provider: {provider}")
-    if provider == "openai": 
-        try: from openai import OpenAI; logging.info("OpenAI lib OK.") 
-        except ImportError: logging.error("OpenAI lib missing."); modules_ok = False
-    elif provider == "gpt4all": 
-        try: from gpt4all import GPT4All; logging.info("GPT4All lib OK.") 
-        
-        except ImportError: logging.error("GPT4All lib missing."); modules_ok = False
-    elif provider == "lm_studio": 
-        try: import lmstudio; logging.info("lmstudio lib OK.") 
-        except ImportError: logging.error("lmstudio lib missing."); modules_ok = False
-    elif provider in ["ollama", "jan"]: logging.info(f"{provider.capitalize()} uses 'requests'.")
-    else: logging.warning(f"Provider '{provider}' unknown for module check.")
-    if not modules_ok: logging.warning(f"Module check FAILED for '{provider}'.")
-    return modules_ok
+    """Checks for necessary libraries based on the configured LLM provider."""
+    if not pydantic_available:
+        logging.error("Cannot check modules: Pydantic unavailable.")
+        return False
+    if not isinstance(config, MainConfig):
+         logging.error("Cannot check modules: Invalid config object.")
+         return False
+
+    provider = config.llm_provider
+    modules_ok = True
+    logging.info(f"Checking modules for provider: {provider}")
+
+    # Only check for 'openai' library if explicitly configured
+    if provider == "openai":
+        try:
+            from openai import OpenAI # Check if the library can be imported
+            logging.info("OpenAI library check OK.")
+        except ImportError:
+            logging.error("OpenAI library not found. Please install: pip install openai")
+            modules_ok = False
+    # For providers accessed via requests API, no specific library check is needed here.
+    # We assume 'requests' library is installed as a core dependency.
+    elif provider in ["lm_studio", "gpt4all", "ollama", "jan"]:
+        logging.info(f"Provider '{provider}' uses HTTP requests (requests library assumed installed). No specific provider library needed.")
+    else:
+        logging.warning(f"Provider '{provider}' is unknown for module check. Assuming requests-based interaction.")
+
+    if not modules_ok:
+        logging.warning(f"Module check potentially FAILED for '{provider}'. Ensure necessary libraries are installed.")
+    else:
+         logging.info(f"Module check OK for '{provider}'.")
+
+    return modules_ok # Return status (primarily relevant for OpenAI provider now)

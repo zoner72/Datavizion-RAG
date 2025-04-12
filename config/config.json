@@ -5,14 +5,12 @@
     "response_format": "json",
     "prompt_description": "",
     "temperature": 0.2,
-    "api_key": null,
-    "gpt4all_model_path": null,
     "ollama_server": "http://127.0.0.1:11435",
     "lm_studio_server": "http://localhost:1234",
     "jan_server": "http://localhost:1337/v1",
-    "data_directory": "C:\\Users\\karsd\\Documents\\Python\\Knowledge_LLM\\data",
-    "log_path": "C:\\Users\\karsd\\Documents\\Python\\Knowledge_LLM\\app_logs\\knowledge_llm.log",
-    "embedding_directory": "C:\\Users\\karsd\\Documents\\Python\\Knowledge_LLM\\embeddings",
+    "data_directory": "C:\\Users\\karsd\\Documents\\Python\\Datavizion-RAG\\data",
+    "log_path": "C:\\Users\\karsd\\Documents\\Python\\Datavizion-RAG\\app_logs\\knowledge.log",
+    "embedding_directory": "C:\\Users\\karsd\\Documents\\Python\\Datavizion-RAG\\embeddings",
     "embedding_model_index": "BAAI/bge-small-en-v1.5",
     "embedding_model_query": "BAAI/bge-small-en-v1.5",
     "indexing_profile": "normal",
@@ -52,7 +50,6 @@
         "host": "localhost",
         "port": 6333,
         "collection_name": "knowledge_base_collection",
-        "api_key": null,
         "startup_timeout_s": 60,
         "check_interval_s": 2,
         "quantization_enabled": true,
@@ -62,7 +59,7 @@
     "api": {
         "host": "192.168.1.240",
         "port": 8000,
-        "apiServerAutoStart": true
+        "apiServerAutoStart": false
     },
     "intense": {
         "description": "Advanced indexing...",
@@ -84,11 +81,11 @@
         "knowledge_graph_extraction": false
     },
     "scraped_websites": {
-        "https://www.hbkworld.com/en/products": {
-            "scrape_date": "2025-03-28",
+        "https://www.nvms.com.au": {
+            "scrape_date": "2025-04-11T13:27:36",
             "indexed_text": false,
-            "pdf_log_path": "C:\\Users\\karsd\\Documents\\Python\\Knowledge_LLM\\data\\scraped_websites\\1f2b144fb387\\pdf_links_1f2b144fb387.json",
-            "indexed_pdfs": true
+            "pdf_log_path": "C:\\Users\\karsd\\Documents\\Python\\Datavizion-RAG\\data\\scraped_websites\\www.nvms.com.au\\pdf_links_www.nvms.com.au.json",
+            "indexed_pdfs": false
         }
     }
 }

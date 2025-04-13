@@ -138,7 +138,9 @@ class StatusTab(QWidget):
 
         # --- GUI Settings ---
         try:
-            gui_config = self.config.gui # Access nested gui settings
+            gui_config = getattr(self.config, 'gui', None)  # Use a default value if 'gui' is missing
+            if gui_config is None:
+                raise AttributeError("Missing 'gui' attribute in config.")
             self.log_refresh_ms = getattr(gui_config, 'gui_log_refresh_ms', DEFAULT_LOG_REFRESH_MS)
             self.log_lines_to_show = getattr(gui_config, 'gui_log_lines', DEFAULT_LOG_LINES)
 

@@ -8,7 +8,7 @@ Custom knowledge based query assistant.
 All program requirements will be created during startup, based on you data folder.
 This will take time
 
-Knowledge_LLM/
+Root/
 ├── main.py
 ├── splash_widget.py
 ├── config/

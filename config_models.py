@@ -65,6 +65,7 @@ class MainConfig(BaseModel):
     response_format: Optional[str] = "json"
     prompt_description: Optional[str] = ""
     temperature: float = Field(default=0.2, ge=0.0, le=2.0)
+    assistant_name: str = "Assistant"
 
     # API & Server Settings
     api_key: Optional[str] = None

@@ -1,5 +1,3 @@
-# File: scripts/ingest/scrape_pdfs.py (Updated Config Loading)
-
 import aiohttp
 import asyncio
 from bs4 import BeautifulSoup
@@ -135,23 +133,74 @@ async def fetch_html(session: aiohttp.ClientSession, url: str, config: MainConfi
         except Exception as e: logging.warning(f"Unexpected error fetching HTML {url}: {e}"); return ""
 
 async def extract_links(current_url: str, soup: BeautifulSoup) -> Tuple[List[str], List[str]]:
-    # ... (implementation unchanged) ...
-    """Extracts absolute crawlable links and PDF links from soup."""
     crawl_links = set()
     pdf_links = set()
     parsed_current = urlparse(current_url)
     domain_parts = parsed_current.netloc.split('.')
-    base_domain_root = ".".join(domain_parts[-2:]) if len(domain_parts) > 2 else parsed_current.netloc
-    logging.debug(f"Extracting links based on root domain: {base_domain_root}")
-    for tag in soup.find_all("a", href=True):
+    # Use netloc directly for exact domain/subdomain matching initially for debugging
+    current_domain = parsed_current.netloc
+    # base_domain_root calculation might be too broad/narrow depending on site structure
+    base_domain_root = ".".join(domain_parts[-2:]) if len(domain_parts) >= 2 else parsed_current.netloc # Handle cases like 'localhost'
+
+    logging.info(f"[extract_links] Processing: {current_url}")
+    logging.info(f"[extract_links] Base Domain Root Filter: {base_domain_root}")
+    logging.info(f"[extract_links] Exact Domain Filter: {current_domain}")
+
+    link_tags = soup.find_all("a", href=True)
+    logging.debug(f"[extract_links] Found {len(link_tags)} <a> tags with href.")
+
+    for tag in link_tags:
         href = tag['href']
-        abs_url = urljoin(current_url, href); abs_url, _ = urldefrag(abs_url)
-        parsed_abs = urlparse(abs_url)
-        if parsed_abs.scheme not in ("http", "https") or not parsed_abs.netloc: continue
-        href_lower = href.lower()
-        is_pdf = href_lower.endswith(".pdf") or '.pdf?' in href_lower or '.pdf#' in href_lower
-        if is_pdf: pdf_links.add(abs_url)
-        elif parsed_abs.netloc.endswith(base_domain_root): crawl_links.add(abs_url)
+        logging.debug(f"[extract_links] --- Checking href: '{href}'")
+        try:
+            abs_url = urljoin(current_url, href)
+            abs_url, _ = urldefrag(abs_url) # Remove fragment
+            parsed_abs = urlparse(abs_url)
+
+            logging.debug(f"[extract_links]   Resolved URL: {abs_url}")
+            logging.debug(f"[extract_links]   Parsed Scheme: {parsed_abs.scheme}, Netloc: {parsed_abs.netloc}")
+
+            # Check Scheme
+            if parsed_abs.scheme not in ("http", "https"):
+                logging.debug(f"[extract_links]   REJECTED: Invalid scheme '{parsed_abs.scheme}'.")
+                continue
+
+            # Check Netloc (Domain)
+            if not parsed_abs.netloc:
+                logging.debug(f"[extract_links]   REJECTED: Empty netloc.")
+                continue
+
+            # Check if it's a PDF link
+            href_lower = abs_url.lower() # Check absolute url for .pdf
+            is_pdf = href_lower.endswith(".pdf") or '.pdf?' in href_lower or '.pdf#' in href_lower
+            if is_pdf:
+                logging.debug(f"[extract_links]   ACCEPTED (PDF): {abs_url}")
+                pdf_links.add(abs_url)
+                continue # Don't add PDFs to crawl links
+
+            # --- Domain Filtering Logic ---
+            # Option A: Strict - must match the exact starting domain/subdomain
+            # domain_match = (parsed_abs.netloc == current_domain)
+            # Option B: Slightly looser - must end with base domain root (e.g., allows subdomains)
+            domain_match = parsed_abs.netloc.endswith(base_domain_root)
+            # Option C: Even looser - allow specific subdomains if needed
+            # allowed_domains = {current_domain, f"www.{base_domain_root}", f"info.{base_domain_root}"}
+            # domain_match = parsed_abs.netloc in allowed_domains
+
+            if domain_match:
+                # Check if already visited is done in the 'crawl' function, not needed here
+                logging.debug(f"[extract_links]   ACCEPTED (Crawl): {abs_url}")
+                crawl_links.add(abs_url)
+            else:
+                logging.debug(f"[extract_links]   REJECTED: Domain '{parsed_abs.netloc}' doesn't match filter '{base_domain_root}'.")
+                pass # Explicitly do nothing if domain doesn't match
+
+        except Exception as e_link:
+             # Log errors during individual link processing but continue
+             logging.warning(f"[extract_links] Error processing link href '{href}' from {current_url}: {e_link}")
+             continue # Skip to the next link tag
+
+    logging.info(f"[extract_links] Extracted {len(crawl_links)} crawl links and {len(pdf_links)} PDF links from {current_url}")
     return list(crawl_links), list(pdf_links)
 
 async def save_text(output_dir: str, url: str, soup: BeautifulSoup, rejected_dir: Optional[str] = None) -> Optional[str]:
@@ -239,10 +288,8 @@ async def crawl(url: str, session: aiohttp.ClientSession, depth: int, mode: str,
     for text_files_sub, _ in results: current_text_files.extend(text_files_sub)
     return current_text_files, []
 
-# --- Main Runner Function (Keep as before) ---
 # Accepts MainConfig
 async def run_scrape(start_url: str, mode: str, output_dir: str, config: MainConfig, pdf_link_log_path: Optional[str] = None):
-    # ... (implementation unchanged) ...
     """Main function to orchestrate scraping based on mode and config."""
     global visited_urls, robots_cache, semaphore
     visited_urls = set(); robots_cache = {}

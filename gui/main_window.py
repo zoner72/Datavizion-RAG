@@ -120,18 +120,24 @@ class KnowledgeBaseGUI(QMainWindow):
         self.status_tab = StatusTab(config=self.config, project_root=self.project_root, parent=self)
         self.tabs.addTab(self.status_tab, "📊 Status & Logs")
 
+        self.tabs.setCurrentWidget(self.chat_tab)
+
         self.statusBar = QStatusBar()
         self.setStatusBar(self.statusBar)
-        self.llm_status_label = QLabel("LLM: Idle")
+        self.llm_status_label = QLabel("LLM: Unknown")
         self.index_status_label = QLabel("Index: Unknown")
-        self.qdrant_status_label = QLabel("Qdrant: Unknown")
+        self.qdrant_status_label = QLabel("Qdrant Docker: Starting...")
         self.busy_indicator = QProgressBar()
         self.busy_indicator.setRange(0, 0)
         self.busy_indicator.setVisible(False)
 
-        for widget in [self.busy_indicator, QLabel(" "), self.llm_status_label,
-                       QLabel(" | "), self.index_status_label, QLabel(" | "), self.qdrant_status_label]:
-            self.statusBar.addPermanentWidget(widget)
+        self.statusBar.addPermanentWidget(self.busy_indicator)
+        self.statusBar.addPermanentWidget(QLabel("  "))  # Tiny gap
+        self.statusBar.addPermanentWidget(self.llm_status_label)
+        self.statusBar.addPermanentWidget(QLabel("     |     "))  # Wide divider
+        self.statusBar.addPermanentWidget(self.index_status_label)
+        self.statusBar.addPermanentWidget(QLabel("     |     "))  # Wide divider
+        self.statusBar.addPermanentWidget(self.qdrant_status_label)
 
     def _connect_signals(self):
         self.config_tab.configSaveRequested.connect(self.handle_config_save)
@@ -152,18 +158,23 @@ class KnowledgeBaseGUI(QMainWindow):
             QMessageBox.critical(self, "Validation Error", f"Validation failed:\n{e}")
 
     def _notify_tabs_of_config_reload(self, config: MainConfig):
-        for tab in [self.config_tab, self.data_tab, self.chat_tab, self.api_tab, self.status_tab]:
-            if hasattr(tab, 'update_config'):
-                tab.update_config(config)
+        self.config_tab.update_display(config)
+        if hasattr(self.data_tab, "update_components_from_config"):
+            self.data_tab.update_components_from_config(config)
+        if hasattr(self.chat_tab, "update_components_from_config"):
+            self.chat_tab.update_components_from_config(config)
+
+
 
     def update_llm_status(self, message: str):
-        self.llm_status_label.setText(message)
+        self.llm_status_label.setText(f"LLM: {message}")
 
     def update_index_status(self, message: str):
-        self.index_status_label.setText(message)
+        self.index_status_label.setText(f"Index: {message}")
 
     def update_qdrant_status(self, message: str):
-        self.qdrant_status_label.setText(message)
+        self.qdrant_status_label.setText(f"Qdrant Docker: {message}")
+
 
     def show_busy_indicator(self, message: str = "Processing..."):
         self.busy_indicator.setVisible(True)

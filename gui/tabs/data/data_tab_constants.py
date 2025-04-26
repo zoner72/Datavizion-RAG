@@ -31,18 +31,24 @@ HEALTH_NA_VALUE = "N/A"
 HEALTH_STATUS_ERROR = "Error"
 
 # Add Sources Group
-DATA_ADD_SOURCES_GROUP_TITLE = "Add Data Sources"
-DATA_ADD_DOC_BUTTON = "Add Document(s)"
+DATA_ADD_SOURCES_GROUP_TITLE = "Add Documents"
+DATA_ADD_DOC_BUTTON = "Add Document(s)"  # Already present
+
 DATA_REFRESH_INDEX_BUTTON = "Refresh Index (Add New)"
 DATA_REBUILD_INDEX_BUTTON = "Rebuild Index (All Files)"
 DATA_IMPORT_LOG_BUTTON = "Download PDFs from Log File"
 
 # Dialogs
-DIALOG_WARNING_TITLE = "Warning"
-DIALOG_ERROR_TITLE = "Error"
-DIALOG_INFO_TITLE = "Information"
+DIALOG_WARNING_TITLE = "Warning"        # Already present
+DIALOG_ERROR_TITLE = "Error"            # Already present
+DIALOG_INFO_TITLE = "Information"       # Already present
 DIALOG_CONFIRM_TITLE = "Confirm"
 DIALOG_PROGRESS_TITLE = "Progress"
+
+# --- Newly Added Constants ---
+DIALOG_SELECT_DOC_TITLE = "Add Local Documents"
+DIALOG_SELECT_DOC_FILTER = "Docs (*.pdf *.docx *.txt *.md);;All (*)"
+DIALOG_ERROR_FILE_COPY = "Copy Fail '{filename}': {e}"
 
 # Warning Messages
 DIALOG_WARNING_MISSING_URL = "Enter Website URL."

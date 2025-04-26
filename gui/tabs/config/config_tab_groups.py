@@ -2,7 +2,7 @@
 
 from PyQt6.QtWidgets import (
     QGroupBox, QVBoxLayout, QHBoxLayout, QLabel, QTextEdit, QSlider, QSizePolicy,
-    QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox, QFormLayout, QCheckBox
+    QLineEdit, QComboBox, QFormLayout, QToolButton
 )
 from PyQt6.QtCore import Qt
 
@@ -34,36 +34,20 @@ def _build_llm_data_group(config_tab):
 
     return group
 
-def _build_embedding_group(config_tab):
-    group = QGroupBox("Embedding Model Settings")
+def _build_rebuild_settings_group(config_tab):
+    group = QGroupBox("Index Settings (Requires Rebuild)")
     layout = QFormLayout(group)
     layout.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
     group.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
     group.setMinimumWidth(400)
     layout.setAlignment(Qt.AlignmentFlag.AlignTop)
 
-    index_model = add_config_setting(config_tab, layout, "Index Model:", "embedding_model_index", default_value="bge-base-en")
-    query_model = add_config_setting(config_tab, layout, "Query Model:", "embedding_model_query", default_value="bge-base-en")
-
-    # Store references for later toggle
-    index_model.setMinimumWidth(300)
-    query_model.setMinimumWidth(300)
-
-    # Initially make them read-only
-    for field in [index_model, query_model]:
-        field.setReadOnly(True)
-        field.setStyleSheet("QLineEdit { background-color: #f0f0f0; color: #505050; }")
-
-    # Add checkbox to unlock editing
-    def toggle_editable(state):
-        enable = state == Qt.CheckState.Checked
-        from gui.tabs.config.config_tab_widgets import toggle_embedding_edit_widgets
-        toggle_embedding_edit_widgets(config_tab, enable)
-
-    edit_checkbox = QCheckBox("Enable Editing")
-    edit_checkbox.stateChanged.connect(toggle_editable)
-    layout.addRow(QLabel(""), edit_checkbox)
-
+    # These are critical settings that require reindexing
+    add_config_setting(config_tab, layout, "Index Model:", "embedding_model_index", default_value="bge-base-en")
+    add_config_setting(config_tab, layout, "Query Model:", "embedding_model_query", default_value="bge-base-en")
+    add_config_setting(config_tab, layout, "Chunk Size:", "chunk_size", default_value=512)
+    add_config_setting(config_tab, layout, "Chunk Overlap:", "chunk_overlap", default_value=50)
+    add_config_setting(config_tab, layout, "Relevance Threshold:", "relevance_threshold", default_value=0.3)
     add_config_setting_with_browse(config_tab, layout, "Embedding Cache Dir:", "embedding_directory", dialog_title=CONFIG_SELECT_EMBEDDING_DIR_TITLE)
 
     return group
@@ -183,19 +167,40 @@ def _build_llm_data_group(config_tab):
 
     return group
 
-
-def _build_prompt_template_group(config_tab):
-    group = QGroupBox("Prompt Template")
+def build_chat_settings_group(tab):
+    group = QGroupBox("Chat Settings")
     layout = QVBoxLayout(group)
-    group.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-    group.setMinimumWidth(400)
-    layout.setAlignment(Qt.AlignmentFlag.AlignTop)
 
-    label = QLabel("Use {context} and {query} in the template:")
-    layout.addWidget(label)
+    # Assistant Name
+    assistant_name_label = QLabel("Assistant Name:")
+    tab.assistant_name_input = QLineEdit()
+    tab.assistant_name_input.setText(tab.config.assistant_name)
+    layout.addWidget(assistant_name_label)
+    layout.addWidget(tab.assistant_name_input)
+    tab.settings_widgets["assistant_name"] = tab.assistant_name_input
 
-    text_edit = QTextEdit()
-    config_tab.settings_widgets["prompt_template"] = text_edit
-    layout.addWidget(text_edit)
+    # --- Collapsible Prompt Template ---
+    collapsible_button = QToolButton()
+    collapsible_button.setText("▶️ Prompt Template (Click to Expand)")
+    collapsible_button.setCheckable(True)
+    collapsible_button.setChecked(False)
+    collapsible_button.setStyleSheet("QToolButton { border: none; font-weight: bold; }")
+    layout.addWidget(collapsible_button)
+    tab.prompt_template_toggle_button = collapsible_button  # << Only moved this line here (after creation)
+
+    tab.prompt_template_input = QTextEdit()
+    tab.prompt_template_input.setPlainText(tab.config.prompt_template)
+    tab.prompt_template_input.setVisible(False)
+    tab.prompt_template_input.setMinimumHeight(150)
+    tab.settings_widgets["prompt_template"] = tab.prompt_template_input
+    layout.addWidget(tab.prompt_template_input)
+
+    def toggle_prompt_template():
+        expanded = collapsible_button.isChecked()
+        tab.prompt_template_input.setVisible(expanded)
+        collapsible_button.setText("🔽 Prompt Template (Click to Collapse)" if expanded else "▶️ Prompt Template (Click to Expand)")
+
+    collapsible_button.clicked.connect(toggle_prompt_template)
 
     return group
+

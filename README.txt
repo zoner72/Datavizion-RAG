@@ -15,6 +15,7 @@ Key Features
 • **Real-time log viewer** and health summary to monitor threads, index size, and last operation time.  
 • **Customizable LLM settings** with templates, temperature, and response format for major LLM software, or just use openai.  
 • **Built-in “intense” indexing profile** for deeper, overlapping chunks.  
+• **Not geting the answer you expect, add your own answer which can be used later for model training. 
 
 Screenshots
 -----------
@@ -49,6 +50,7 @@ python main.py
 Known Issues & Tips
 Drag & Drop does not work when you run inside an IDE window; please launch via your system’s file explorer or terminal.
 Embeddings Dir, MCP Server and CLient are currently not in use, maybe future releases if the interest is there.
+I had great results with phi-4 mini, but feel free to try some other LLMs
 
 Developed with Python 3.11 and Docker Desktop.
 

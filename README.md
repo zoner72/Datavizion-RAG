@@ -19,10 +19,10 @@ Key Features
 Screenshots
 -----------
 ![Alt text](/screenshots/config_tab.png?raw=true "Config Tab")  
-2. Data Tab ­– screenshots/data_tab.png  
-3. API Tab ­– screenshots/api_tab.png  
-4. Status Tab ­– screenshots/status_tab.png  
-5. Chat Tab ­– screenshots/chat_tab.png  
+![Alt text](/screenshots/data_tab.png?raw=true "Data Tab")  
+![Alt text](/screenshots/api_tab.png?raw=true "API Tab Tab")  
+![Alt text](/screenshots/status_tab.png?raw=true "Status Tab")  
+![Alt text](/screenshots/chat_tab.png?raw=true "Chat Tab")  
 
 Installation (Easy for Beginners)
 ---------------------------------

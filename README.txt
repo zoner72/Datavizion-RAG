@@ -8,12 +8,12 @@ Datavizion is a beginner-friendly desktop RAG implementation that lets you scrap
 Key Features
 ------------
 • **Five intuitive tabs** for configuration, data management, API control, live status, and chat/query.  
-• **Drag & Drop** support for files and folders (note: doesn’t work inside IDEs—launch from your OS file explorer).  
-• **Website scraper** that downloads text and PDFs, then builds a semantic index.  
-• **Vector database integration** via Docker-powered Qdrant, with advanced quantization options.  
-• **Internal API server** you can turn on/off from the GUI.  
+• **Drag & Drop** support for files and folders.  
+• **Website scraper** that downloads text and PDFs from websites, then builds a semantic index.  
+• **Vector database integration** via Docker-powered Qdrant, with advanced quantization options.   
+• **Internal API server** which you can use to port to your own website to for setting up your own assistant.  
 • **Real-time log viewer** and health summary to monitor threads, index size, and last operation time.  
-• **Customizable LLM settings** with templates, temperature, and response format.  
+• **Customizable LLM settings** with templates, temperature, and response format for major LLM software, or just use openai.  
 • **Built-in “intense” indexing profile** for deeper, overlapping chunks.  
 
 Screenshots

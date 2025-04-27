@@ -1,82 +1,63 @@
-Custom knowledge based query assistant.
-- install modules
-- upload your data (e.g. pdf / doc) to the data folder (delete dummy data)
-- change the API key in config.json
-- c:/poppler/library/bin
-- start main.py
+Datavizion
+=========
 
-All program requirements will be created during startup, based on you data folder.
-This will take time
+Overview
+--------
+Datavizion is a beginner-friendly desktop RAG implementation that lets you scrape, index, query, and manage documents with a few clicks. Powered by PyQt6, Qdrant, and your choice of LLM backends, it delivers a smooth, drag-and-drop workflow for turning websites and PDFs into an intelligent knowledge base.
 
-Root/
-├── main.py
-├── splash_widget.py
-├── config/
-│   └── config.json
-├── gui/
-│   ├── __init__.py
-│   ├── main_window.py
-│   ├── chat/
-│   │   ├── __init__.py
-│   │   ├── chat_tab.py
-│   │   └── llm_worker.py
-│   ├── data/
-│   │   ├── __init__.py
-│   │   ├── data_tab.py
-│   │   └── import_utils.py
-│   ├── config/
-│   │   ├── __init__.py
-│   │   └── config_tab.py    
-│   ├── status/
-│   │   └── status_tab.py
-│   └── common/
-│       ├── __init__.py
-│       ├── query_text_edit.py
-│       └── ui_utils.py
-├── scripts/
-│   ├── llm/
-│   │   ├── llm_interface.py
-│   │   └── mcp_client.py
-│   ├── apps_logs/
-│   │   └── scraper.log
-│   ├── retrieval/
-│   │   └── retrieval_core.py
-│   ├── indexing/
-│   │   ├── embedding_utils.py
-│   │   └── index_manager.py
-│   └── ingest
-│   │   ├── data_loader.py
-│   │   └── scrape_pdfs.py
-├── cache/
-│   ├── query_cache.json
-│   └── corrections.json
-├── app_logs/
-│   ├── knowledge_llm.log
-│   └── ...
-├── data/
-│   └── [uploaded/processed PDFs]
-└── docker-compose.yml
+Key Features
+------------
+• **Five intuitive tabs** for configuration, data management, API control, live status, and chat/query.  
+• **Drag & Drop** support for files and folders (note: doesn’t work inside IDEs—launch from your OS file explorer).  
+• **Website scraper** that downloads text and PDFs, then builds a semantic index.  
+• **Vector database integration** via Docker-powered Qdrant, with advanced quantization options.  
+• **Internal API server** you can turn on/off from the GUI.  
+• **Real-time log viewer** and health summary to monitor threads, index size, and last operation time.  
+• **Customizable LLM settings** with templates, temperature, and response format.  
+• **Built-in “intense” indexing profile** for deeper, overlapping chunks.  
+
+Screenshots
+-----------
+1. Config Tab ­– screenshots/config_tab.png  
+2. Data Tab ­– screenshots/data_tab.png  
+3. API Tab ­– screenshots/api_tab.png  
+4. Status Tab ­– screenshots/status_tab.png  
+5. Chat Tab ­– screenshots/chat_tab.png  
+
+Installation (Easy for Beginners)
+---------------------------------
+1. **Install Docker**  
+   Download and install Docker Desktop (Windows/macOS/Linux):  
+   https://www.docker.com/get-started  
+2. **Clone this repo**  
+   ```bash
+   git clone https://github.com/YourName/MyAppName.git
+   cd DATAVIZION-RAG
+Create a virtual environment & install Python deps
 
 
+python3 -m venv .venv
+source .venv/bin/activate    # or `.venv\Scripts\activate` on Windows
+pip install -r requirements.txt
+Start Qdrant with Docker Compose
 
+docker-compose up -d
+Run the app
 
-//"api_key": "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",
+python main.py
 
-If your dataset is small (<10K vectors), use IndexFlatL2.
-If your dataset is large (50K+ vectors), use IndexIVFFlat with nlist: sqrt(# vectors).
-Keep chunk_size: 128 and chunk_overlap: 50 for best results.
+Known Issues & Tips
+Drag & Drop does not work when you run inside an IDE window; please launch via your system’s file explorer or terminal.
+Embeddings Dir, MCP Server and CLient are currently not in use, maybe future releases if the interest is there.
 
-support openai, gpt4all and ollama (ollama incl streaming)
-docker desktop for windows
+Developed with Python 3.11 and Docker Desktop.
 
+For very large scrapes, set scraping_timeout: null in your config.json to allow unlimited runtime.
+You can find many more settings in the config.json to tinker with (see config_models.py for details)
 
+Support & Coffee
+If Datavizion saves you time and effort, please consider buying me a coffee!
+https://www.buymeacoffee.com/zoner
 
-Top-k Parameterization: In VectorStoreConnector.search(), consider allowing top_k to be controlled globally via config.
-
-Token Budget Handling: MemoryContextManager can use token length estimates to trim context size toward max_tokens_per_context.
-
-Source ID Robustness: In get_document_source(), validate if the index exists before accessing .iloc[doc_id].
-
-Unit Tests: Add coverage for hybrid search fusion logic and memory updates.
-
-Optional: Log context chunks retrieved per query if debug=True in config for traceability.
+License
+This project is released under the MIT License. See LICENSE.txt for the full text.

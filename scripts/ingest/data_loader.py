@@ -12,7 +12,6 @@ from pathlib import Path
 
 # --- Pydantic Config Import ---
 try:
-    # Assumes config_models.py is in the project root
     project_root_dir = Path(__file__).resolve().parents[2] # Adjust if structure differs
     if str(project_root_dir) not in sys.path:
         sys.path.insert(0, str(project_root_dir))
@@ -21,12 +20,11 @@ try:
 except ImportError as e:
     logging.critical(f"FATAL ERROR: Cannot import Pydantic models in DataLoader: {e}. Ingestion will fail.", exc_info=True)
     pydantic_available = False
-    # Define dummy class if needed
+
     class MainConfig: pass
 
-# --- Preprocessing Utils Import ---
+
 try:
-    # Assuming preprocessing_utils.py is in the SAME directory (scripts/ingest)
     from .preprocessing_utils import (
         basic_clean_text, advanced_clean_text, remove_boilerplate,
         extract_basic_metadata, extract_enhanced_metadata, extract_metadata_with_llm
@@ -55,7 +53,6 @@ class RejectedFileError(Exception):
 class DataLoader:
     """Loads, preprocesses, and chunks documents based on configuration profiles."""
 
-    # Accepts MainConfig object
     def __init__(self, config: MainConfig):
         """Initializes the DataLoader with Pydantic configuration."""
         if not pydantic_available:
@@ -65,10 +62,6 @@ class DataLoader:
 
         if not PREPROCESSING_UTILS_AVAILABLE:
              logger.error("DataLoader initialized, but preprocessing utilities are UNAVAILABLE.")
-             # Optionally raise error if utils are mandatory
-
-        # No need to pre-fetch simple config values like chunk size, etc.
-        # Access them directly from self.config when needed.
 
         self._ensure_nltk_punkt() # NLTK setup remains the same
 
@@ -80,8 +73,7 @@ class DataLoader:
             try: nltk.download('punkt', quiet=True); nltk.data.find('tokenizers/punkt'); logger.info("NLTK 'punkt' download successful.")
             except Exception as e: logger.warning(f"NLTK 'punkt' download failed: {e}. Fallback may be used.", exc_info=False)
 
-    # REMOVED _get_config_value method
-    # REMOVED _get_active_profile_settings method
+
 
     # --- Main Processing Function ---
     def load_and_preprocess_file(self, file_path: str) -> List[Tuple[str, Dict]]:
@@ -124,17 +116,12 @@ class DataLoader:
             if active_profile_config and hasattr(active_profile_config, attr_name):
                 profile_val = getattr(active_profile_config, attr_name)
 
-            # Use profile value if it's set (not None)
             if profile_val is not None:
-                # logger.debug(f"Using '{attr_name}' from profile '{active_profile_name}': {profile_val}")
                 return profile_val
             else:
-                # Fallback to top-level config attribute
                 top_level_val = getattr(self.config, attr_name, default)
-                # logger.debug(f"Using top-level '{attr_name}': {top_level_val}")
                 return top_level_val
 
-        # Determine effective settings using the helper or direct access for top-level only ones
         enable_advanced_cleaning = get_effective_setting('enable_advanced_cleaning', False)
         boilerplate_removal = get_effective_setting('boilerplate_removal', False)
         metadata_level = get_effective_setting('metadata_extraction_level', 'basic')
@@ -160,13 +147,10 @@ class DataLoader:
         cleaned_text = raw_text
         logger.debug(f"Applying text cleaning for {short_filename}...")
         try:
-            # Apply cleaning based on determined effective settings
             if boilerplate_removal and PREPROCESSING_UTILS_AVAILABLE:
                 cleaned_text = remove_boilerplate(cleaned_text)
             if enable_advanced_cleaning and PREPROCESSING_UTILS_AVAILABLE:
                 cleaned_text = advanced_clean_text(cleaned_text)
-            # Apply basic clean only if advanced/boilerplate were not enabled/effective
-            # This matches original logic where basic was used for 'normal' profile
             if not enable_advanced_cleaning and not boilerplate_removal:
                  cleaned_text = basic_clean_text(cleaned_text) # Assumes basic_clean is safe
 
@@ -188,37 +172,31 @@ class DataLoader:
                  else:
                       logger.warning("LLM metadata extraction selected but no model specified. Falling back to basic.")
                       metadata = extract_basic_metadata(file_path, cleaned_text)
-             else: # basic or default
+             else: 
                  metadata = extract_basic_metadata(file_path, cleaned_text)
 
-             # Add common fields
              metadata["source_filepath"] = file_path
              metadata["filename"] = short_filename
              metadata["indexing_profile"] = active_profile_name
-             # Add inferred types based on filename heuristics
              metadata["inferred_doc_type"] = self._infer_doc_type(file_path)
              metadata["inferred_linked_to"] = self._infer_linked_to(file_path)
 
         except Exception as meta_e:
             logger.error(f"Error extracting metadata for {short_filename}: {meta_e}", exc_info=True)
             metadata = {"error_extracting_metadata": str(meta_e)} # Store error
-            # Add essential fallbacks
             metadata["source_filepath"] = file_path; metadata["filename"] = short_filename
             metadata["indexing_profile"] = active_profile_name
             metadata["inferred_doc_type"] = self._infer_doc_type(file_path)
             metadata["inferred_linked_to"] = self._infer_linked_to(file_path)
 
-        # --- 4. Chunk Text ---
         logger.debug(f"Chunking text (Size: {effective_chunk_size}, Overlap: {effective_chunk_overlap}) for {short_filename}...")
         try:
-            # Pass effective chunk size/overlap determined earlier
             chunk_dicts = self.chunk_text(
                 cleaned_text, effective_chunk_size, effective_chunk_overlap
             )
             if not chunk_dicts: raise RejectedFileError("Chunking yielded zero chunks")
         except Exception as chunk_e: raise RuntimeError(f"Chunk fail: {chunk_e}") from chunk_e
 
-        # --- 5. Finalize Chunks and Metadata ---
         logger.debug("Finalizing chunks...")
         final_chunk_data = []
         for i, chunk_dict in enumerate(chunk_dicts):
@@ -232,10 +210,7 @@ class DataLoader:
 
             text_for_embedding = chunk_dict["text"]
             if prepend_metadata and PREPROCESSING_UTILS_AVAILABLE:
-                 # Logic for prepending metadata to text_for_embedding
-                 # (Keep this logic, ensure it reads from final_chunk_metadata correctly)
                  prepend_items = []
-                 # Example: Add inferred type and product name if available
                  if final_chunk_metadata.get('inferred_doc_type') != 'unknown': prepend_items.append(f"Type: {final_chunk_metadata['inferred_doc_type']}")
                  if final_chunk_metadata.get('product_name'): prepend_items.append(f"Product: {final_chunk_metadata['product_name']}")
                  if prepend_items:
@@ -251,15 +226,12 @@ class DataLoader:
 
         logger.info(f"Processing FINISH: {short_filename}, Generated {len(final_chunk_data)} final chunks.")
         return final_chunk_data
-    # --- END OF load_and_preprocess_file METHOD ---
 
-    # --- File Type Specific Extraction Methods (No changes needed) ---
     def extract_pdf_hybrid(self, file_path: str) -> str:
-        # ... (implementation remains the same) ...
         logger.debug(f"Extracting text from PDF: {os.path.basename(file_path)}")
         text_content = ""; doc = None
         try:
-            import fitz as pymupdf_local # Local import for clarity
+            import fitz as pymupdf_local 
             doc = pymupdf_local.open(file_path)
             if doc.is_encrypted: logger.warning(f"Skip encrypted PDF: {os.path.basename(file_path)}"); return ""
             for page_num in range(len(doc)):
@@ -274,17 +246,15 @@ class DataLoader:
         return text_content
 
     def extract_text_from_docx(self, file_path: str) -> str:
-        # ... (implementation remains the same) ...
         logger.debug(f"Extracting text from DOCX: {os.path.basename(file_path)}")
         try:
             doc = docx.Document(file_path)
             full_text = [para.text for para in doc.paragraphs]
-            # Consider adding table extraction if needed
             return "\n".join(full_text)
         except Exception as e: logger.error(f"Error DOCX {os.path.basename(file_path)}: {e}"); return ""
 
     def extract_text_from_txt(self, file_path: str) -> str:
-        # ... (implementation remains the same) ...
+
         logger.debug(f"Extracting text from TXT/MD: {os.path.basename(file_path)}")
         encodings_to_try = ['utf-8', 'latin-1', 'windows-1252']
         for enc in encodings_to_try:
@@ -298,11 +268,8 @@ class DataLoader:
             return raw_bytes.decode('utf-8', errors='replace')
         except Exception as e: logger.error(f"Failed byte decode {os.path.basename(file_path)}: {e}"); return ""
 
-    # --- Text Chunking Logic (No changes needed) ---
-    # Accepts size/overlap as args, doesn't access config directly
+
     def chunk_text(self, text: str, chunk_size: int, chunk_overlap: int) -> List[Dict]:
-        # ... (implementation remains the same, using NLTK/fallback sentence splitting) ...
-        # ... (Includes table block extraction/handling) ...
         chunks = []
         if not text or not text.strip(): return chunks
         table_blocks = self._extract_table_blocks(text)
@@ -330,27 +297,26 @@ class DataLoader:
         final_chunks = [c for c in chunks if c.get("text")]; logger.debug(f"Chunking produced {len(final_chunks)} chunks.")
         return final_chunks
 
-    def _extract_table_blocks(self, text: str) -> list[str]: # No change
+    def _extract_table_blocks(self, text: str) -> list[str]: 
         try: return re.findall(r"\[TABLE START\](.*?)\[TABLE END\]", text, re.DOTALL | re.IGNORECASE)
         except Exception as e: logger.warning(f"Error extracting table blocks: {e}"); return []
 
-    def _remove_table_blocks(self, text: str) -> str: # No change
+    def _remove_table_blocks(self, text: str) -> str: 
         try: return re.sub(r"\[TABLE START\].*?\[TABLE END\]", "", text, flags=re.DOTALL | re.IGNORECASE).strip()
         except Exception as e: logger.warning(f"Error removing table blocks: {e}"); return text
 
-    # --- Simple Inference Methods (No changes needed) ---
-    def _infer_linked_to(self, file_path: str) -> str: # No change
+    def _infer_linked_to(self, file_path: str) -> str: 
         try:
             filename = os.path.basename(file_path).lower()
             if "strain" in filename: return "strain_gauge"
-            if "daq" in filename: return "daq" # ... other rules ...
+            if "daq" in filename: return "daq"
             return "generic_component"
         except Exception: return "generic_component"
 
-    def _infer_doc_type(self, file_path: str) -> str: # No change
+    def _infer_doc_type(self, file_path: str) -> str: 
         try:
             filename = os.path.basename(file_path).lower()
             if "manual" in filename: return "manual"
-            if "spec" in filename: return "specification" # ... other rules ...
+            if "spec" in filename: return "specification" 
             return "unknown"
         except Exception: return "unknown"

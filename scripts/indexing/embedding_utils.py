@@ -4,8 +4,7 @@ import logging
 from sentence_transformers import SentenceTransformer
 import torch
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 class CustomSentenceTransformer(SentenceTransformer):
     def __init__(self, model_name: str, *args, **kwargs):

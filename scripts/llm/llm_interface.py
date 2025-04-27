@@ -10,8 +10,6 @@ import numpy as np
 from typing import Optional, List, Any, Dict, Callable # Ensure typing imports are present
 
 
-# --- Pydantic Config Import ---
-# Assumes config_models.py is accessible via sys.path
 try:
     from config_models import MainConfig
     pydantic_available = True
@@ -37,9 +35,6 @@ except ImportError:
     tokenizer_available = False
     logging.warning("AutoTokenizer (for prompt size estimation) not found. Install transformers.")
 
-# --- Initialization ---
-# Basic logger setup, main app config might refine it
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__) # Create logger for this module
 
 _cross_encoder_instance = None

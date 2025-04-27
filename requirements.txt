@@ -1,20 +1,20 @@
-pip install 
-    pydantic 
-    PyQt6 
-    sentence-transformers 
-    transformers 
-    torch 
-    numpy 
-    qdrant-client 
-    httpx 
-    requests 
-    beautifulsoup4
-    aiohttp 
-    aiofiles 
-    chardet 
-    tqdm 
-    PyMuPDF 
-    python-docx 
-    nltk
-    "uvicorn[standard]" fastapi
-    mcp
+aiofiles
+aiohttp
+beautifulsoup4
+chardet
+fastapi
+httpx
+mcp
+numpy
+pydantic
+PyMuPDF
+PyQt6
+python-docx
+qdrant-client
+requests
+sentence-transformers
+torch
+tqdm
+transformers
+uvicorn[standard]
+nltk

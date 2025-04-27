@@ -31,7 +31,7 @@ Installation (Easy for Beginners)
    https://www.docker.com/get-started  
 2. **Clone this repo**  
    ```bash
-   git clone https://github.com/YourName/MyAppName.git
+   git clone https://github.com/zoner72/Datavizion-RAG.git
    cd DATAVIZION-RAG
 Create a virtual environment & install Python deps
 

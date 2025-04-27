@@ -18,7 +18,7 @@ Key Features
 
 Screenshots
 -----------
-1. Config Tab ­– screenshots/config_tab.png  
+![Alt text](/screenshots/config_tab.png?raw=true "Config Tab")  
 2. Data Tab ­– screenshots/data_tab.png  
 3. API Tab ­– screenshots/api_tab.png  
 4. Status Tab ­– screenshots/status_tab.png  

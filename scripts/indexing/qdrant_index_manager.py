@@ -7,15 +7,11 @@ from typing import Optional, List, Dict, Callable # Added Tuple
 from pathlib import Path
 import sys
 import os
-
-from sympy import im
 import json
 from httpx import ConnectError, ReadTimeout
-from pathlib import Path # Ensure Path is imported
 from qdrant_client import QdrantClient, models
 from qdrant_client.http.exceptions import ResponseHandlingException, UnexpectedResponse
-from qdrant_client.models import (PointStruct,
-                                  Filter, FieldCondition, MatchValue, SearchParams) # Added imports
+from qdrant_client.models import (Filter, FieldCondition, MatchValue, SearchParams) # Added imports
 
 # --- Pydantic Config Import ---
 try:
@@ -131,7 +127,7 @@ class QdrantIndexManager:
                 self.client.get_collections() # Verify connection using self.client
                 # --- END CHANGE ---
                 logger.info("Qdrant client initialized and connection verified.")
-                self._init_collection() # This might also use self.client internally now
+                self._ensure_collection() # This might also use self.client internally now
                 return
 
             except (ConnectError, ReadTimeout, ResponseHandlingException, UnexpectedResponse) as e:
@@ -208,6 +204,69 @@ class QdrantIndexManager:
             logger.error(f"Failed to init/create collection '{self.collection_name}': {e}", exc_info=True)
             raise RuntimeError(f"Could not init Qdrant collection '{self.collection_name}'") from e
 
+
+    def _ensure_collection(self):
+        """
+        Ensure the collection exists with the correct schema.
+
+        - If force_recreate is True, drop & recreate unconditionally.
+        - Otherwise, if the collection does not exist, create it.
+        - If it exists and force_recreate is False, leave it untouched.
+        """
+        # 1) Fetch existing collection names
+        existing = {c.name for c in self.client.get_collections().collections}
+
+        # 2) Decide whether to create or recreate
+        if self.config.qdrant.force_recreate or self.collection_name not in existing:
+            if self.collection_name in existing:
+                logger.info(f"Force-recreate enabled: deleting '{self.collection_name}'…")
+                try:
+                    self.client.delete_collection(collection_name=self.collection_name, timeout=60)
+                except Exception as exc:
+                    logger.warning(f"Couldn’t delete '{self.collection_name}': {exc}")
+
+            # Build VectorParams exactly as before
+            if self.vector_size is None:
+                self.vector_size = self._get_embedding_dim()
+            quant_cfg = None
+            if self.config.qdrant.quantization_enabled:
+                quant_cfg = models.ScalarQuantization(
+                    scalar=models.ScalarQuantizationConfig(
+                        type=models.ScalarType.INT8,
+                        quantile=0.99,
+                        always_ram=self.config.qdrant.quantization_always_ram
+                    )
+                )
+            vectors_cfg = models.VectorParams(
+                size=self.vector_size,
+                distance=models.Distance.COSINE,
+                quantization_config=quant_cfg
+            )
+
+            # Now create (or recreate) the collection
+            logger.info(f"Creating Qdrant collection '{self.collection_name}' (dim={self.vector_size})…")
+            self.client.create_collection(
+                collection_name=self.collection_name,
+                vectors_config=vectors_cfg,
+                timeout=60
+            )
+            logger.info(f"Collection '{self.collection_name}' ready.")
+
+        else:
+            # 3) Collection already exists and we’re not forced to recreate
+            logger.info(f"Using existing Qdrant collection '{self.collection_name}'.")
+            if self.vector_size is None:
+                info = self.client.get_collection(collection_name=self.collection_name)
+                vec_params = info.config.params.vectors
+                # handle both named and unnamed vector params
+                if hasattr(vec_params, "size"):
+                    self.vector_size = vec_params.size
+                else:
+                    first = next(iter(vec_params.values()))
+                    self.vector_size = first.size
+                logger.info(f"Inferred existing vector_size={self.vector_size}")
+
+
     def _get_embedding_dim(self) -> int:
         """Infers embedding dimension from the model_index."""
         if self.model_index is None:
@@ -259,12 +318,12 @@ class QdrantIndexManager:
             logger.warning(f"Attempting delete Qdrant collection: {self.collection_name}")
             delete_result = self.client.delete_collection(collection_name=self.collection_name, timeout=60)
             logger.info(f"Collection delete result: {delete_result}. Re-initializing...")
-            self._init_collection() # Recreate
+            self._ensure_collection() # Recreate
             logger.info("Reinitialized Qdrant collection after clearing.")
             return True
         except Exception as e:
              logger.error(f"Error clearing collection '{self.collection_name}': {e}", exc_info=True)
-             try: logger.warning("Attempting reinitialize after clear error..."); self._init_collection()
+             try: logger.warning("Attempting reinitialize after clear error..."); self._ensure_collection()
              except Exception as init_e: logger.error(f"Failed reinitialize after clear error: {init_e}", exc_info=True)
              return False
 

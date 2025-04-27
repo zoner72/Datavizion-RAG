@@ -6,22 +6,15 @@ import sys
 import os
 import subprocess
 import time
-import traceback
-import uuid 
-import shutil 
-from urllib.parse import urlparse, quote
+from urllib.parse import urlparse
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QMessageBox, QTableWidgetItem, QFileDialog, QApplication)
-from PyQt6.QtCore import pyqtSignal, QTimer, QThread, QObject, Qt, QMetaObject, Q_ARG, pyqtSlot, QCoreApplication
+from PyQt6.QtCore import pyqtSignal, QTimer, QThread, QObject, Qt, QMetaObject, Q_ARG, pyqtSlot
 from pathlib import Path
 import hashlib
 import requests
 import functools
 
 from config_models import MainConfig
-from . import data_tab_constants
-
-
-
 
 from .data_tab_groups import (
     build_website_group,
@@ -29,9 +22,6 @@ from .data_tab_groups import (
     build_add_source_group,
     build_status_bar_group,
 )
-
-from scripts.ingest.data_loader import DataLoader, RejectedFileError
-
 
 logger = logging.getLogger(__name__)
 
@@ -213,7 +203,11 @@ class ScrapeWorker(BaseWorker):
                 stderr=subprocess.PIPE,
                 text=True, encoding='utf-8', errors='replace'
             )
-            stdout, stderr = self._process.communicate(timeout=300)
+            timeout = self.config.scraping_timeout
+            if timeout is None:
+                stdout, stderr = self._process.communicate()        # no timeout
+            else:
+                stdout, stderr = self._process.communicate(timeout=timeout)
 
             # bail if cancelled mid‐communicate
             if not self._is_running:

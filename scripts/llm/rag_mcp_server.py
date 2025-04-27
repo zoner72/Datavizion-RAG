@@ -74,17 +74,9 @@ except ImportError:
     class mcp_types:
         """Dummy mcp_types class."""
         pass
-    # --- END CORRECTION ---
-# -------------------
 
-# --- Basic Logging Setup ---
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - [MCP_SERVER] - %(name)s - %(message)s',
-    stream=sys.stderr
-)
 logger = logging.getLogger(__name__)
-# ---------------------------
+
 
 # --- Global Store ---
 config: Optional[MainConfig] = None # Uses Optional correctly

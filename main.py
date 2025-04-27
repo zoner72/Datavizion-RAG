@@ -11,6 +11,7 @@ from PyQt6.QtWidgets import QApplication, QMessageBox
 
 from config_models import MainConfig, _load_json_data, ValidationError
 from splash_widget import AnimatedSplashScreen
+from version import __version__   # ← wherever you defined it
 
 # -------------------
 # Path Resolution
@@ -75,9 +76,7 @@ def setup_logging(log_path: Path, config: MainConfig):
     logging.basicConfig(level=log_level, format=log_format, handlers=handlers)
     logging.info("Logging setup complete.")
 
-# -------------------
-# Docker/Qdrant Manager
-# -------------------
+
 class DockerQdrantManager:
     def __init__(self, config: MainConfig, splash=None):
         self.config = config.qdrant
@@ -136,9 +135,7 @@ class DockerQdrantManager:
 
         return True, "Qdrant running."
 
-# -------------------
-# Main Application Logic
-# -------------------
+
 def main():
     paths = resolve_project_paths()
 
@@ -161,7 +158,7 @@ def main():
     setup_logging(config.log_path, config)
 
     app = QApplication(sys.argv)
-    splash = AnimatedSplashScreen()
+    splash = AnimatedSplashScreen(version=__version__)
     splash.show()
     app.processEvents()
 

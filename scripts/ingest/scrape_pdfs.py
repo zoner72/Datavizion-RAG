@@ -49,17 +49,9 @@ except ImportError as e:
     def _load_json_data(p): return {}
     # Exit early if core models cannot be imported - script needs config to run
     sys.exit(1)
-# ---------------------------------------
 
-# --- Logging Setup (Basic setup, config might reconfigure) ---
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - [SCRAPE_PDFS:%(name)s] - %(message)s"
-)
 logger = logging.getLogger(__name__)
-# -------------------------------------------------------------
 
-# --- Global Variables (Keep as before) ---
 semaphore: Optional[asyncio.Semaphore] = None # Initialize later
 robots_cache: Dict[str, Optional[urllib.robotparser.RobotFileParser]] = {}
 visited_urls: Set[str] = set()

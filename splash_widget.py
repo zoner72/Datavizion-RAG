@@ -3,7 +3,7 @@ from PyQt6.QtGui import QPixmap, QFont, QColor, QFontMetrics
 from PyQt6.QtCore import QTimer, QSize
 
 class AnimatedSplashScreen(QSplashScreen):
-    def __init__(self, background_path="splash.png"):
+    def __init__(self, background_path="splash.png", version: str = ""):
         pixmap = QPixmap(background_path)
         if pixmap.isNull():
             # Fallback: create a solid color pixmap if image fails to load
@@ -30,6 +30,15 @@ class AnimatedSplashScreen(QSplashScreen):
         self.subtitle_label.move(
             (self.width() - self.subtitle_label.width()) // 2, 95
         )
+
+       # Version label (bottom‐left or wherever you like)
+        if version:
+            self.version_label = QLabel(f"v{version}", self)
+            self.version_label.setStyleSheet("color: white;")
+            self.version_label.setFont(QFont("Arial", 10))
+            self.version_label.adjustSize()
+            # position at bottom‐left with a 10px margin
+            self.version_label.move(10, self.height() - self.version_label.height() - 10)
 
         # Animated status label (bottom-left)
         self.status_label = QLabel("Starting...", self)

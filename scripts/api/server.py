@@ -5,17 +5,14 @@ import os
 import sys
 from pathlib import Path
 import argparse
-import uvicorn # Make sure uvicorn is installed in .venv
+import uvicorn 
 import contextlib
 from fastapi import FastAPI, HTTPException, Body, Depends
-from pydantic import BaseModel, Field # Keep Pydantic for request/response models
-from typing import Optional, AsyncGenerator, Dict, Any # Added Any
+from pydantic import BaseModel, Field 
+from typing import Optional, AsyncGenerator, Dict, Any 
 
-# --- Add project root to sys.path ---
-# This helps Python find modules like 'config_models' or 'scripts.*'
-# Adjust the number of '.parents' based on server.py's location relative to root
+
 try:
-    # Assumes server.py is in project_root/scripts/api/
     project_root = Path(__file__).resolve().parents[2]
     if str(project_root) not in sys.path:
         sys.path.insert(0, str(project_root))
@@ -42,10 +39,7 @@ except ImportError as e:
     def _load_json_data(p): return {}
     # Exit early if core models cannot be imported
     sys.exit(1)
-# ---------------------------------------
 
-# --- Core Component Imports ---
-# Keep these imports, ensure they are correct relative to project root
 try:
     from scripts.indexing.qdrant_index_manager import QdrantIndexManager
     from scripts.indexing.embedding_utils import CustomSentenceTransformer
@@ -64,12 +58,7 @@ except ImportError as e:
     def load_provider_modules(*args, **kwargs): return False
 # --------------------------
 
-# --- Logging Setup ---
-# Basic setup initially, will be potentially reconfigured by loaded config later
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - [API_SERVER:%(name)s] - %(message)s",
-)
+
 logger = logging.getLogger(__name__)
 # -------------------
 

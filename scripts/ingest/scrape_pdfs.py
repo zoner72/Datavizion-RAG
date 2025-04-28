@@ -13,7 +13,7 @@ import re
 import hashlib
 import argparse
 from pathlib import Path
-from typing import Optional, Tuple, List, Dict, Set, Union, Any # Added Union, Any
+from typing import Optional, Tuple, List, Dict, Set
 import sys
 
 # --- Environment Variable for Config ---
@@ -396,7 +396,7 @@ if __name__ == "__main__":
                     # Pass context if needed by validators in MainConfig
                     validation_context = {'embedding_model_index': config_data.get('embedding_model_index')}
                     config = MainConfig.model_validate(config_data, context=validation_context)
-                    logging.info(f"Configuration validated successfully.")
+                    logging.info("Configuration validated successfully.")
                     # Optional: Reconfigure logging based on loaded config
                     log_level_str = getattr(config.logging, 'level', 'INFO').upper()
                     log_level = getattr(logging, log_level_str, logging.INFO)
@@ -481,14 +481,35 @@ if __name__ == "__main__":
          parser.error("--pdf-link-log is required for --mode pdf_download")
 
     # --- Run the Scrape ---
+        # --- Determine Output Directory (fixed to use log_path) ---
+    try:
+        if config.log_path:
+            output_dir_to_use = config.log_path.parent.resolve()
+            logging.info(f"Using output directory based on log_path parent: {output_dir_to_use}")
+        else:
+            default_data_dir = (project_root / "data").resolve()
+            output_dir_to_use = default_data_dir
+            logging.warning(f"No log_path set, using default data directory: {output_dir_to_use}")
+    except Exception as e:
+        output_dir_to_use = Path("./data").resolve()
+        logging.error(f"Error determining output directory: {e}, using fallback {output_dir_to_use}")
+
+    # --- Override from CLI if given ---
+    if args.output_dir:
+         try:
+             output_dir_to_use = Path(args.output_dir).resolve()
+             logging.info(f"Using output directory from command line override: {output_dir_to_use}")
+         except Exception as e:
+              logging.error(f"Invalid --output-dir specified '{args.output_dir}': {e}. Using previous value: {output_dir_to_use}")
+
     logging.info(f"Starting scrape task. Mode: '{args.mode}', URL: '{args.url}', Output Dir: '{output_dir_to_use}'")
     try:
         scrape_results = asyncio.run(run_scrape(
             start_url=args.url,
             mode=args.mode,
-            output_dir=str(output_dir_to_use), # Pass as string
-            config=config, # Pass the validated MainConfig object
-            pdf_link_log_path=pdf_log_path_to_use # Pass determined path
+            output_dir=str(output_dir_to_use),
+            config=config,
+            pdf_link_log_path=pdf_log_path_to_use
         ))
         logging.info("Scrape task finished.")
         # Print final results JSON to stdout

@@ -6,7 +6,6 @@ from PyQt6.QtWidgets import QWidget, QVBoxLayout
 from PyQt6.QtCore import pyqtSignal
 
 from gui.tabs.chat.chat_tab_groups import build_chat_group
-from gui.tabs.chat.chat_tab_handlers import ChatTabHandlers
 
 try:
     from config_models import MainConfig

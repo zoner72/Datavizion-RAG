@@ -86,147 +86,123 @@ class DataLoader:
         p_file_path = Path(file_path)
 
         # --- 0. Pre-checks ---
-        # Convert Path object to string for os.access if needed
         if not p_file_path.is_file() or not os.access(str(p_file_path), os.R_OK):
-             raise FileNotFoundError(f"File not found or cannot be read: {file_path}")
+            raise FileNotFoundError(f"File not found or cannot be read: {file_path}")
 
-        # Access rejected folder name from config
         rejected_folder_name = self.config.rejected_docs_foldername
         try:
             if rejected_folder_name in p_file_path.parent.parts:
                 logger.info(f"SKIP rejected (in '{rejected_folder_name}' dir): {short_filename}")
                 raise RejectedFileError(f"File in rejected folder '{rejected_folder_name}'")
         except Exception as path_e:
-             logger.warning(f"Error checking rejected folder path for {short_filename}: {path_e}")
-             raise RejectedFileError(f"Failed rejected folder check: {path_e}")
+            logger.warning(f"Error checking rejected folder path for {short_filename}: {path_e}")
+            raise RejectedFileError(f"Failed rejected folder check: {path_e}")
 
         extension = p_file_path.suffix.lower()
         if extension not in SUPPORTED_EXTENSIONS:
             raise RejectedFileError(f"Unsupported extension '{extension}'")
 
-        # --- Get Effective Settings Based on Profile ---
+        # --- Get settings ---
         active_profile_name = self.config.indexing_profile
-        logger.debug(f"Using profile '{active_profile_name}' for {short_filename}")
-        # Get the nested profile model object (e.g., self.config.intense) if it exists
         active_profile_config = getattr(self.config, active_profile_name, None)
 
-        # Helper to get setting: Checks profile first, then top-level config
         def get_effective_setting(attr_name: str, default: Any = None) -> Any:
             profile_val = None
             if active_profile_config and hasattr(active_profile_config, attr_name):
                 profile_val = getattr(active_profile_config, attr_name)
-
-            if profile_val is not None:
-                return profile_val
-            else:
-                top_level_val = getattr(self.config, attr_name, default)
-                return top_level_val
+            return profile_val if profile_val is not None else getattr(self.config, attr_name, default)
 
         enable_advanced_cleaning = get_effective_setting('enable_advanced_cleaning', False)
         boilerplate_removal = get_effective_setting('boilerplate_removal', False)
         metadata_level = get_effective_setting('metadata_extraction_level', 'basic')
         metadata_fields = get_effective_setting('metadata_fields_to_extract', [])
         prepend_metadata = get_effective_setting('prepend_metadata_to_chunk', False)
-        effective_chunk_size = get_effective_setting('chunk_size', 200) # Fallback to 200 if not in profile/top-level
-        effective_chunk_overlap = get_effective_setting('chunk_overlap', 100) # Fallback to 100
+        effective_chunk_size = get_effective_setting('chunk_size', 200)
+        effective_chunk_overlap = get_effective_setting('chunk_overlap', 100)
 
-        # --- 1. Load Raw Content ---
-        raw_text = ""; load_exception = None
+        # --- 1. Load raw content ---
+        raw_text = ''; load_exception = None
         logger.debug(f"Loading raw content for {short_filename}...")
         try:
             if extension == ".pdf": raw_text = self.extract_pdf_hybrid(file_path)
             elif extension == ".docx": raw_text = self.extract_text_from_docx(file_path)
-            elif extension in [".txt", ".md"]: raw_text = self.extract_text_from_txt(file_path)
-        except fitz.FileDataError as fd_err: load_exception = fd_err
-        except Exception as load_e: load_exception = load_e
-        if load_exception: raise RuntimeError(f"Load text fail: {load_exception}") from load_exception
-        if not raw_text or not raw_text.strip(): raise RejectedFileError("No text content extracted")
+            else: raw_text = self.extract_text_from_txt(file_path)
+        except Exception as load_e:
+            load_exception = load_e
+        if load_exception:
+            raise RuntimeError(f"Load text fail: {load_exception}") from load_exception
+        if not raw_text.strip():
+            raise RejectedFileError("No text content extracted")
         logger.debug(f"Raw text length: {len(raw_text)}")
 
-        # --- 2. Clean Text ---
+        # --- 2. Clean text ---
         cleaned_text = raw_text
-        logger.debug(f"Applying text cleaning for {short_filename}...")
         try:
             if boilerplate_removal and PREPROCESSING_UTILS_AVAILABLE:
                 cleaned_text = remove_boilerplate(cleaned_text)
             if enable_advanced_cleaning and PREPROCESSING_UTILS_AVAILABLE:
                 cleaned_text = advanced_clean_text(cleaned_text)
             if not enable_advanced_cleaning and not boilerplate_removal:
-                 cleaned_text = basic_clean_text(cleaned_text) # Assumes basic_clean is safe
-
-            if not cleaned_text or not cleaned_text.strip():
+                cleaned_text = basic_clean_text(cleaned_text)
+            if not cleaned_text.strip():
                 raise RejectedFileError("Text empty after cleaning")
-        except Exception as clean_e: raise RuntimeError(f"Clean fail: {clean_e}") from clean_e
+        except Exception as clean_e:
+            raise RuntimeError(f"Clean fail: {clean_e}") from clean_e
 
         # --- 3. Extract Metadata ---
-        metadata = {}; metadata_llm_model = None
-        logger.debug(f"Extracting metadata (level: {metadata_level}) for {short_filename}...")
+        metadata = {}
         try:
-             # Call appropriate extraction function based on effective level
-             if metadata_level == "enhanced" and PREPROCESSING_UTILS_AVAILABLE:
-                 metadata = extract_enhanced_metadata(file_path, cleaned_text, metadata_fields)
-             elif metadata_level == "llm" and PREPROCESSING_UTILS_AVAILABLE:
-                 metadata_llm_model = get_effective_setting('metadata_llm_model', None)
-                 if metadata_llm_model:
-                      metadata = extract_metadata_with_llm(cleaned_text, metadata_fields, metadata_llm_model)
-                 else:
-                      logger.warning("LLM metadata extraction selected but no model specified. Falling back to basic.")
-                      metadata = extract_basic_metadata(file_path, cleaned_text)
-             else: 
-                 metadata = extract_basic_metadata(file_path, cleaned_text)
-
-             metadata["source_filepath"] = file_path
-             metadata["filename"] = short_filename
-             metadata["indexing_profile"] = active_profile_name
-             metadata["inferred_doc_type"] = self._infer_doc_type(file_path)
-             metadata["inferred_linked_to"] = self._infer_linked_to(file_path)
-
+            if metadata_level == "enhanced" and PREPROCESSING_UTILS_AVAILABLE:
+                metadata = extract_enhanced_metadata(file_path, cleaned_text, metadata_fields)
+            else:
+                metadata = extract_basic_metadata(file_path, cleaned_text)
         except Exception as meta_e:
-            logger.error(f"Error extracting metadata for {short_filename}: {meta_e}", exc_info=True)
-            metadata = {"error_extracting_metadata": str(meta_e)} # Store error
-            metadata["source_filepath"] = file_path; metadata["filename"] = short_filename
-            metadata["indexing_profile"] = active_profile_name
-            metadata["inferred_doc_type"] = self._infer_doc_type(file_path)
-            metadata["inferred_linked_to"] = self._infer_linked_to(file_path)
+            logger.error(f"Error extracting metadata: {meta_e}", exc_info=True)
+            metadata = {"error_extracting_metadata": str(meta_e)}
+        metadata.update({
+            "source_filepath": file_path,
+            "filename": short_filename,
+            "indexing_profile": active_profile_name,
+            "inferred_doc_type": self._infer_doc_type(file_path),
+            "inferred_linked_to": self._infer_linked_to(file_path)
+        })
 
+        # --- 4. Chunk text ---
         logger.debug(f"Chunking text (Size: {effective_chunk_size}, Overlap: {effective_chunk_overlap}) for {short_filename}...")
         try:
-            chunk_dicts = self.chunk_text(
-                cleaned_text, effective_chunk_size, effective_chunk_overlap
-            )
-            if not chunk_dicts: raise RejectedFileError("Chunking yielded zero chunks")
-        except Exception as chunk_e: raise RuntimeError(f"Chunk fail: {chunk_e}") from chunk_e
+            chunk_dicts = self.chunk_text(cleaned_text, effective_chunk_size, effective_chunk_overlap)
+            if not chunk_dicts:
+                raise RejectedFileError("Chunking yielded zero chunks")
 
-        logger.debug("Finalizing chunks...")
-        final_chunk_data = []
+            # ─── normalize bare-string chunks ───
+            chunk_dicts = [({"text": c} if isinstance(c, str) else c) for c in chunk_dicts]
+        except Exception as chunk_e:
+            raise RuntimeError(f"Chunk fail: {chunk_e}") from chunk_e
+
+        # --- 5. Build final chunk list ---
+        final_chunks = []
         for i, chunk_dict in enumerate(chunk_dicts):
-            if not isinstance(chunk_dict, dict) or not chunk_dict.get("text", "").strip():
-                 logger.warning(f"Skipping invalid/empty chunk {i} for {short_filename}")
-                 continue
-            final_chunk_metadata = metadata.copy()
-            final_chunk_metadata.update(chunk_dict.get("metadata", {}))
-            final_chunk_metadata['chunk_index'] = i
-            final_chunk_metadata['chunk_token_count'] = chunk_dict.get("token_count", 0) # Use count from chunker
-
-            text_for_embedding = chunk_dict["text"]
-            if prepend_metadata and PREPROCESSING_UTILS_AVAILABLE:
-                 prepend_items = []
-                 if final_chunk_metadata.get('inferred_doc_type') != 'unknown': prepend_items.append(f"Type: {final_chunk_metadata['inferred_doc_type']}")
-                 if final_chunk_metadata.get('product_name'): prepend_items.append(f"Product: {final_chunk_metadata['product_name']}")
-                 if prepend_items:
-                     prepend_str = " ".join(prepend_items) + " \n"
-                     text_for_embedding = f"{prepend_str}{text_for_embedding}"
-
-            processed_chunk_dict = {
-                "text": chunk_dict["text"], # Original chunk text
-                "text_with_context": text_for_embedding, # Text potentially with metadata prepended
-                "metadata": final_chunk_metadata # Combined metadata
-            }
-            final_chunk_data.append((file_path, processed_chunk_dict))
-
-        logger.info(f"Processing FINISH: {short_filename}, Generated {len(final_chunk_data)} final chunks.")
-        return final_chunk_data
-
+            text = chunk_dict.get("text", "").strip()
+            if not text:
+                continue
+            chunk_meta = metadata.copy()
+            chunk_meta.update(chunk_dict.get("metadata", {}))
+            chunk_meta.update({
+                "chunk_index": i,
+                "chunk_token_count": chunk_dict.get("token_count", 0)
+            })
+            text_for_embedding = text
+            if prepend_metadata:
+                prefix = f"Type: {chunk_meta['inferred_doc_type']} "
+                text_for_embedding = prefix + text
+            final_chunks.append((file_path, {
+                "text": text,
+                "text_with_context": text_for_embedding,
+                "metadata": chunk_meta
+            }))
+        logger.info(f"Processing FINISH: {short_filename}, Generated {len(final_chunks)} chunks.")
+        return final_chunks
+    
     def extract_pdf_hybrid(self, file_path: str) -> str:
         logger.debug(f"Extracting text from PDF: {os.path.basename(file_path)}")
         text_content = ""; doc = None

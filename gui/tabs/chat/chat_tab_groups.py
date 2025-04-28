@@ -1,6 +1,6 @@
 # File: gui/tabs/chat/chat_tab_groups.py
 
-from PyQt6.QtWidgets import QVBoxLayout, QHBoxLayout, QGroupBox, QWidget
+from PyQt6.QtWidgets import QVBoxLayout, QHBoxLayout, QGroupBox
 from PyQt6.QtCore import Qt
 from gui.tabs.chat.chat_tab_widgets import (
     create_query_input,

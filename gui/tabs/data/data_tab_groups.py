@@ -1,15 +1,12 @@
 import logging
-from pathlib import Path
 from PyQt6.QtWidgets import (
     QGroupBox,
     QVBoxLayout,
     QHBoxLayout,
     QLabel,
     QPushButton,
-    QProgressBar,
-    QWidget
+    QProgressBar
 )
-from PyQt6.QtCore import Qt, QTimer
 from .data_tab_widgets import (
     create_url_input_row,
     create_button_row,

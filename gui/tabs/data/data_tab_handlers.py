@@ -1,19 +1,17 @@
 import logging
 from pathlib import Path
-import os
+
 import time
 import json
 import shutil
 from PyQt6.QtWidgets import QMessageBox, QTableWidgetItem
-from PyQt6.QtCore import QThread, Qt, QTimer
+from PyQt6.QtCore import Qt, QTimer
 from .data_tab_constants import (
     DIALOG_WARNING_TITLE, DIALOG_CONFIRM_TITLE, DIALOG_INFO_TITLE,
     DIALOG_ERROR_TITLE, DIALOG_SELECT_DOC_TITLE, DIALOG_SELECT_DOC_FILTER,
     DIALOG_ERROR_FILE_COPY, DIALOG_INFO_WEBSITE_CONFIG_DELETED
 )
-from .data_tab import (
-    BaseWorker, IndexWorker, ScrapeWorker,
-    PDFDownloadWorker, LocalFileScanWorker, IndexStatsWorker
+from .data_tab import (LocalFileScanWorker, IndexStatsWorker
 )
 from typing import TYPE_CHECKING
 
@@ -193,6 +191,7 @@ class DataTabHandlers:
             QTimer.singleShot(100, lambda: self.prompt_index_downloaded(output_paths, source_url))
         self.data_tab.show_message("PDF Download Status", msg, QMessageBox.Icon.Information)
         self.conditional_enabling()
+        
 
     def prompt_index_downloaded(self, file_paths: list[str], source_url: str | None):
         if not file_paths:
@@ -345,6 +344,14 @@ class DataTabHandlers:
         table.setItem(row, 3, QTableWidgetItem(str(count)))
         self.save_tracked_websites()
         self.conditional_enabling()
+        # Update Website Indexed column after scrape success
+        if result_data.get("status") == "success":
+            scraped_url = result_data.get("url")
+            if scraped_url:
+                self.tab.set_indexed_status_for_url(scraped_url, is_indexed=True)
+                self.tab.handlers.save_tracked_websites()
+                self.tab.handlers.run_summary_update()
+
         logger.critical("***** handle_scrape_finished COMPLETED *****")
 
     def handle_dropped_files(self, file_paths: list[str]):

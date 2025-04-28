@@ -8,10 +8,10 @@ from typing import Optional
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QLabel, QPushButton,
-    QSizePolicy, QMessageBox, QApplication # Added QApplication
+    QSizePolicy, QMessageBox
 )
 # Import QProcess and related classes for managing the server subprocess
-from PyQt6.QtCore import QTimer, QProcess, Qt, QSettings, QProcessEnvironment, pyqtSignal
+from PyQt6.QtCore import QTimer, QProcess, Qt, QProcessEnvironment, pyqtSignal
 from PyQt6.QtGui import QCloseEvent # Import QCloseEvent
 
 # --- Pydantic Config Import ---

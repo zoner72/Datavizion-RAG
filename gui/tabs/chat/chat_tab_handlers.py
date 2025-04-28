@@ -1,7 +1,6 @@
 # File: gui/tabs/chat/chat_tab_handlers.py
 
 import logging
-from PyQt6.QtCore import QTimer
 from PyQt6.QtGui import QTextCursor
 from config_models import MainConfig
 from gui.tabs.chat.chat_tab_utils import save_correction_for_training

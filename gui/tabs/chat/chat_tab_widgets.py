@@ -1,7 +1,6 @@
 # File: gui/tabs/chat/chat_tab_widgets.py
 
-from PyQt6.QtWidgets import QTextEdit, QPushButton, QLabel
-from PyQt6.QtCore import Qt
+from PyQt6.QtWidgets import QTextEdit, QPushButton
 
 def create_query_input(tab):
     input_box = QTextEdit()

@@ -96,7 +96,7 @@ class KnowledgeBaseGUI(QMainWindow):
         self.tabs = QTabWidget()
         layout.addWidget(self.tabs)
 
-        self.config_tab = ConfigTab(config=self.config, parent=self)
+        self.config_tab = ConfigTab(config=self.config, project_root=self.project_root, parent=self)
         self.tabs.addTab(self.config_tab, "⚙️ Configuration")
 
         self.data_tab = DataTab(config=self.config, project_root=self.project_root, parent=self)
@@ -139,6 +139,9 @@ class KnowledgeBaseGUI(QMainWindow):
         self.statusBar.addPermanentWidget(QLabel("     |     "))  # Wide divider
         self.statusBar.addPermanentWidget(self.qdrant_status_label)
 
+        self.update_statusbar_labels()
+
+
     def _connect_signals(self):
         self.config_tab.configSaveRequested.connect(self.handle_config_save)
         self.data_tab.indexStatusUpdate.connect(self.update_index_status)
@@ -164,6 +167,23 @@ class KnowledgeBaseGUI(QMainWindow):
         if hasattr(self.chat_tab, "update_components_from_config"):
             self.chat_tab.update_components_from_config(config)
 
+    def update_statusbar_labels(self):
+        try:
+            # Update LLM model name
+            llm_model = self.config.model or "Unknown"
+            self.llm_status_label.setText(f"LLM: {llm_model}")
+
+            # Update index count
+            if self.index_manager:
+                index_count = self.index_manager.count()
+                if index_count is not None:
+                    self.index_status_label.setText(f"Index: {index_count} vectors")
+                else:
+                    self.index_status_label.setText("Index: Unavailable")
+            else:
+                self.index_status_label.setText("Index: Unknown")
+        except Exception as e:
+            logger.error(f"Failed updating status bar labels: {e}", exc_info=True)
 
 
     def update_llm_status(self, message: str):

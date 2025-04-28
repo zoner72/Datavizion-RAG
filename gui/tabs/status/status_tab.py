@@ -1,16 +1,15 @@
 # File: Knowledge_LLM/gui/tabs/status/status_tab.py (Complete and Updated)
 
 import logging
-import os
 from pathlib import Path
 from typing import Optional # Import Optional
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QLabel, QPushButton, QTextEdit, QHBoxLayout, QCheckBox,
-    QMessageBox, QGroupBox, QApplication # Added QApplication for potential use
+    QMessageBox, QGroupBox
 )
-from PyQt6.QtCore import QTimer, Qt, QUrl, QSettings # Added QSettings
-from PyQt6.QtGui import QTextCursor, QDesktopServices # Added QDesktopServices
+from PyQt6.QtCore import QTimer, Qt, QUrl 
+from PyQt6.QtGui import  QDesktopServices # Added QDesktopServices
 
 
 # --- Pydantic Config Import ---

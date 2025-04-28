@@ -853,6 +853,7 @@ class DataTab(QWidget):
 
     def start_refresh_index(self):
         self.start_index_operation(mode="refresh")
+        self.handlers.run_summary_update()
 
 
     def start_index_operation(
@@ -911,8 +912,24 @@ class DataTab(QWidget):
                 # 4) Re-run health summary
                 self.handlers.run_summary_update()
 
+                # 5) Update the main window statusbar LLM and Index Count (Live fetch from Qdrant)
+                try:
+                    if hasattr(self.main_window_ref, "index_manager") and self.main_window_ref.index_manager:
+                        live_vector_count = self.main_window_ref.index_manager.count()
+                        self.indexStatusUpdate.emit(f"Ready ({live_vector_count:,} vectors)")
+                    else:
+                        self.indexStatusUpdate.emit("Ready")
+                except Exception as e:
+                    logger.error(f"Error fetching live vector count: {e}")
+                    self.indexStatusUpdate.emit("Ready")
+
+                if hasattr(self.main_window_ref, "update_llm_status"):
+                    self.main_window_ref.update_llm_status("Ready")
+
+
             worker.finished.connect(on_index_finished)
 
+        self.handlers.run_summary_update()
         QTimer.singleShot(0, _do_start)
 
 

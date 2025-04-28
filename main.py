@@ -1,3 +1,4 @@
+import json
 import sys
 from pathlib import Path
 import logging
@@ -13,38 +14,6 @@ from config_models import MainConfig, _load_json_data, ValidationError
 from splash_widget import AnimatedSplashScreen
 from version import __version__   # ← wherever you defined it
 
-# -------------------
-# Path Resolution
-# -------------------
-def resolve_project_paths():
-    project_root = Path(__file__).resolve().parent
-    paths = {
-        "project_root": project_root,
-        "config_path": project_root / "config" / "config.json",
-        "log_path": project_root / "app_logs" / "datavizion_rag.log",
-        "data_dir": project_root / "data",
-        "embeddings_dir": project_root / "embeddings",
-    }
-    return paths
-
-# -------------------
-# Directory Ensuring
-# -------------------
-def ensure_directory(path: Path):
-    path.mkdir(parents=True, exist_ok=True)
-
-# -------------------
-# Configuration Loading
-# -------------------
-def load_configuration(config_path: Path) -> Optional[MainConfig]:
-    user_config = _load_json_data(config_path)
-    try:
-        config = MainConfig.model_validate(user_config)
-        return config
-    except ValidationError as e:
-        logging.error(f"Config validation error: {e}")
-        QMessageBox.critical(None, "Configuration Error", str(e))
-        return None
 
 # -------------------
 # Logging Setup
@@ -75,6 +44,53 @@ def setup_logging(log_path: Path, config: MainConfig):
 
     logging.basicConfig(level=log_level, format=log_format, handlers=handlers)
     logging.info("Logging setup complete.")
+
+# -------------------
+# Path Resolution
+# -------------------
+def resolve_project_paths():
+    project_root = Path(__file__).resolve().parent
+    paths = {
+        "project_root": project_root,
+        "config_path": project_root / "config" / "config.json",
+        "log_path": project_root / "app_logs" / "datavizion_rag.log",
+        "data_dir": project_root / "data",
+        "embeddings_dir": project_root / "embeddings",
+    }
+    return paths
+
+# -------------------
+# Directory Ensuring
+# -------------------
+def ensure_directory(path: Path):
+    path.mkdir(parents=True, exist_ok=True)
+
+# -------------------
+# Configuration Loading
+# -------------------
+def load_configuration(config_path: Path) -> Optional[MainConfig]:
+    user_config = _load_json_data(config_path)
+    try:
+        # Serialize the config model and handle WindowsPath
+        config = MainConfig.model_validate(user_config)
+        logging.debug(f"Loaded config values: keyword_weight={config.keyword_weight}, api.auto_start={config.api.auto_start}")
+        
+        # Custom serialization for logging WindowsPath (convert to string)
+        def custom_model_dump(model):
+            # Convert all WindowsPath to string
+            data = model.model_dump()  # This gives you a dictionary
+            for key, value in data.items():
+                if isinstance(value, Path):  # Check if it's a Path object
+                    data[key] = str(value)  # Convert Path to string
+            return data
+        
+        logging.debug(f"Validated config: {json.dumps(custom_model_dump(config), indent=2)}")
+        return config
+    except ValidationError as e:
+        logging.error(f"Config validation error: {e}")
+        QMessageBox.critical(None, "Configuration Error", str(e))
+        return None
+
 
 
 class DockerQdrantManager:

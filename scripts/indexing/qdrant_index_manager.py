@@ -12,6 +12,7 @@ from httpx import ConnectError, ReadTimeout
 from qdrant_client import QdrantClient, models
 from qdrant_client.http.exceptions import ResponseHandlingException, UnexpectedResponse
 from qdrant_client.models import (Filter, FieldCondition, MatchValue, SearchParams) # Added imports
+from scripts.ingest.data_loader import RejectedFileError
 
 # --- Pydantic Config Import ---
 try:
@@ -330,126 +331,58 @@ class QdrantIndexManager:
         # Uses config attributes for batch sizes
     
     def add_documents(self,
-                      documents: List[Dict], # Expects list of {"text":..., "metadata":...}
+                      documents: List[Dict],
                       progress_callback: Optional[Callable[[int, int], None]] = None,
-                      total_items: Optional[int] = None,
                       worker_is_running_flag: Optional[Callable[[], bool]] = None) -> int:
         """Embeds and adds document chunks to the Qdrant collection."""
-        if not self.check_connection(): logger.error("Cannot add docs: Qdrant connection unavailable."); return 0
-        if self.model_index is None: logger.error("Cannot add docs: Indexing model unavailable."); return 0
-        if not documents: logger.info("No documents provided to add_documents."); return 0
-
-        upsert_batch_size = self.config.indexing_batch_size
-        embedding_batch_size = self.config.embedding_batch_size
-        effective_total = total_items if total_items is not None else len(documents)
-        total_added = 0; total_processed = 0; total_skipped = 0
-
-        logger.info(f"Starting batch indexing of {len(documents)} chunks (Embed:{embedding_batch_size}, Upsert:{upsert_batch_size})...")
-        start_time = time.time()
-
-        for i in range(0, len(documents), embedding_batch_size):
-            # Check cancellation flag provided by the worker
-            if worker_is_running_flag and not worker_is_running_flag():
-                 logger.warning("add_documents cancelled by worker flag.")
-                 break # Exit the loop
-
-            batch_dicts = documents[i : i + embedding_batch_size]
-            texts_to_embed = []; valid_indices = []
-            # --- Prepare batch for embedding ---
-            for idx, chunk_dict in enumerate(batch_dicts):
+        if not self.check_connection(): return 0
+        total_added = total_processed = total_skipped = 0
+        batch_size = self.config.embedding_batch_size
+        logger.info(f"Starting batch indexing of {len(documents)} chunks...")
+        for i in range(0, len(documents), batch_size):
+            if worker_is_running_flag and not worker_is_running_flag(): break
+            batch = documents[i:i+batch_size]
+            texts_to_embed, valid_indices = [], []
+            for idx, chunk_dict in enumerate(batch):
                 total_processed += 1
-                # Prefer text_with_context if available, otherwise use text
-                text = chunk_dict.get("text_with_context", chunk_dict.get("text"))
-                if isinstance(text, str) and text.strip():
-                    texts_to_embed.append(text); valid_indices.append(idx)
+                # ─── defensive text extraction ───
+                if isinstance(chunk_dict, str):
+                    text = chunk_dict
+                elif isinstance(chunk_dict, dict):
+                    text = chunk_dict.get("text_with_context") or chunk_dict.get("text")
                 else:
-                    logger.warning(f"Skipping chunk {i+idx}: missing or empty text field.")
+                    raise TypeError(f"Unexpected chunk type {type(chunk_dict)}")
+                if text and text.strip():
+                    texts_to_embed.append(text)
+                    valid_indices.append(idx)
+                else:
                     total_skipped += 1
-
             if not texts_to_embed:
-                 # Report progress even if batch is skipped
-                 if progress_callback and effective_total > 0: progress_callback(min(total_processed, effective_total), effective_total)
-                 continue # Skip to next embedding batch
-
-            # --- Embed Batch ---
-            try:
-                vectors = self.model_index.encode(texts_to_embed, show_progress_bar=False)
-                vectors_list = vectors.tolist() if hasattr(vectors, 'tolist') else [list(v) for v in vectors]
-                if len(vectors_list) != len(texts_to_embed):
-                     raise RuntimeError(f"Embedding count mismatch: Expected {len(texts_to_embed)}, Got {len(vectors_list)}")
-            except Exception as e_embed:
-                logger.error(f"Failed to embed batch starting at index {i}: {e_embed}", exc_info=True)
-                total_skipped += len(texts_to_embed) # Count skipped items
-                 # Report progress after skip
-                if progress_callback and effective_total > 0: progress_callback(min(total_processed, effective_total), effective_total)
-                continue # Skip to next embedding batch
-
-            # --- Prepare Points for Upsert ---
-            points_to_upsert: List[models.PointStruct] = []
-            for vec_idx, original_batch_idx in enumerate(valid_indices):
-                try:
-                    chunk_dict = batch_dicts[original_batch_idx]
-                    metadata = chunk_dict.get("metadata", {})
-                    # Ensure metadata is suitable for JSON serialization (Qdrant requirement)
-                    # Add 'last_modified' if available from metadata (needed for refresh)
-                    metadata['last_modified'] = metadata.get('last_modified', time.time()) # Add current time if missing
-                    metadata['source'] = metadata.get('source', 'Unknown') # Ensure source exists
-
-                    payload = {
-                        # Store both versions if they differ, otherwise just one
-                        "text": chunk_dict.get("text", ""),
-                        "text_with_context": texts_to_embed[vec_idx],
-                        "metadata": metadata # Pass validated/cleaned metadata
-                    }
-                    # Ensure payload is serializable - might need more robust cleaning
-                    payload = json.loads(json.dumps(payload, default=str)) # Basic serialization check
-
-                    points_to_upsert.append(models.PointStruct(
-                        id=metadata.get('doc_id', str(uuid.uuid4())), # Use specific doc_id from metadata if present, else UUID
-                        vector=vectors_list[vec_idx],
-                        payload=payload
-                    ))
-                except Exception as point_prep_err:
-                    logger.error(f"Failed to prepare point for chunk {i+original_batch_idx}: {point_prep_err}", exc_info=True)
-                    total_skipped += 1 # Skip this specific point
-
-            # --- Upsert Points in Batches ---
-            for j in range(0, len(points_to_upsert), upsert_batch_size):
-                # Check cancellation flag again before each upsert batch
+                if progress_callback: progress_callback(min(total_processed, len(documents)), len(documents))
+                continue
+            vectors = self.model_index.encode(texts_to_embed, show_progress_bar=False)
+            vectors_list = (vectors.tolist() if hasattr(vectors, 'tolist') else [list(v) for v in vectors])
+            points = []
+            for vec_idx, orig_idx in enumerate(valid_indices):
+                md = batch[orig_idx].get("metadata", {})
+                md.setdefault('last_modified', time.time())
+                payload = json.loads(json.dumps({
+                    "text": batch[orig_idx].get("text", ""),
+                    "text_with_context": texts_to_embed[vec_idx],
+                    "metadata": md
+                }, default=str))
+                points.append(models.PointStruct(id=md.get('doc_id', str(uuid.uuid4())),
+                                                  vector=vectors_list[vec_idx], payload=payload))
+            for j in range(0, len(points), self.config.indexing_batch_size):
                 if worker_is_running_flag and not worker_is_running_flag():
-                     logger.warning("add_documents cancelled by worker flag during upsert.")
-                     # Need to break outer loop too if cancelled here
-                     raise InterruptedError("Upsert cancelled") # Raise specific error
-
-                upsert_sub_batch = points_to_upsert[j : j + upsert_batch_size]
-                if not upsert_sub_batch: continue # Should not happen but safe check
-                try:
-                    # Use wait=True for synchronous upsert, False for async (potentially faster but less guarantee on immediate availability)
-                    self.client.upsert(collection_name=self.collection_name, points=upsert_sub_batch, wait=True)
-                    total_added += len(upsert_sub_batch)
-                except Exception as e_upsert:
-                    err_details = f" Qdrant Response: {e_upsert.content.decode()[:500]}" if isinstance(e_upsert, UnexpectedResponse) and hasattr(e_upsert, 'content') else ""
-                    logger.error(f"Upsert failed for {len(upsert_sub_batch)} points (batch starting {j}): {e_upsert}{err_details}", exc_info=False) # Log less verbosely on error
-                    total_skipped += len(upsert_sub_batch)
-
-            # Report progress after processing embedding batch
-            if progress_callback and effective_total > 0:
-                try: progress_callback(min(total_processed, effective_total), effective_total)
-                except Exception as cb_err: logger.warning(f"Progress callback failed: {cb_err}")
-
-            # Handle potential cancellation break from outer loop
-                except InterruptedError:
-                    logger.warning("add_documents upsert loop cancelled.")
-            # Fall through to log final stats
-
-        duration = time.time() - start_time
-        logger.info(f"Batch indexing finished in {duration:.2f}s. Total Chunks Processed={total_processed}, Added={total_added}, Skipped={total_skipped}")
-        # Final progress update (only if not cancelled midway)
-        if progress_callback and effective_total > 0 and (not worker_is_running_flag or worker_is_running_flag()):
-             progress_callback(effective_total, effective_total) # Signal 100%
-
+                    raise InterruptedError("Upsert cancelled")
+                sub = points[j:j+self.config.indexing_batch_size]
+                self.client.upsert(collection_name=self.collection_name, points=sub, wait=True)
+                total_added += len(sub)
+            if progress_callback: progress_callback(min(total_processed, len(documents)), len(documents))
+        logger.info(f"Batch indexing finished. Added={total_added}, Skipped={total_skipped}")
         return total_added
- 
+
     def search(self,
                query_text: str,
                query_embedding_model: Optional[SentenceTransformer],
@@ -506,12 +439,16 @@ class QdrantIndexManager:
             logger.error(f"Qdrant search error: {e}", exc_info=True)
             return []
 
-    def refresh_index(self, progress_callback: Optional[Callable[[int, int], None]] = None,
-                    worker_is_running_flag: Optional[Callable[[], bool]] = None) -> int:
+
+    def refresh_index(
+        self,
+        progress_callback: Optional[Callable[[int, int], None]] = None,
+        worker_is_running_flag: Optional[Callable[[], bool]] = None
+    ) -> int:
         """
         Scans the data directory, processes new/updated files, and adds their chunks to the index.
         """
-        logger.info("Starting index refresh scan...")
+        logger.info("Starting index refresh scan…")
         if not self.check_connection():
             logger.error("Qdrant connection unavailable for refresh.")
             return 0
@@ -524,290 +461,169 @@ class QdrantIndexManager:
                 logger.warning(f"Data directory not found for refresh: {data_dir}")
                 return 0
 
-            # 1. Get local files and their modification times
-            # ... (logic as before) ...
-            local_files_map = {}
-            all_local_paths = list(data_dir.rglob("*"))
-            for path in all_local_paths:
-                 if worker_is_running_flag and not worker_is_running_flag(): raise InterruptedError("Cancelled during scan.")
-                 if path.is_file():
-                      try: local_files_map[str(path)] = path.stat().st_mtime
-                      except Exception as stat_err: logger.warning(f"Could not get stats for {path}: {stat_err}")
+            # 1. Gather local files and their mtimes
+            local_files_map: Dict[str, float] = {}
+            for path in data_dir.rglob("*"):
+                if worker_is_running_flag and not worker_is_running_flag():
+                    raise InterruptedError("Cancelled during scan.")
+                if path.is_file():
+                    try:
+                        local_files_map[str(path)] = path.stat().st_mtime
+                    except Exception as stat_err:
+                        logger.warning(f"Could not stat {path}: {stat_err}")
 
-            # 2. Get indexed document metadata from Qdrant
-            # ... (scroll logic as before) ...
-            indexed_docs = {}
-            # ... (populate indexed_docs using scroll) ...
+            # 2. Fetch indexed mtimes from Qdrant (scroll logic)…
+            indexed_docs: Dict[str, float] = {}
+            # … populate indexed_docs …
 
-            # 3. Compare and find files to process
-            # ... (logic as before) ...
-            files_to_process = []
-            for local_path_str, local_mtime in local_files_map.items():
-                 indexed_mtime = indexed_docs.get(local_path_str)
-                 if indexed_mtime is None or local_mtime > indexed_mtime:
-                     files_to_process.append(local_path_str)
+            # 3. Determine which files need processing
+            files_to_process: List[str] = []
+            for fp, mtime in local_files_map.items():
+                if indexed_docs.get(fp, 0) < mtime:
+                    files_to_process.append(fp)
 
             if not files_to_process:
-                 logger.info("No new or updated files found requiring indexing.")
-                 if progress_callback: progress_callback(1, 1)
-                 return 0
-            else:
-                 logger.info(f"Identified {len(files_to_process)} new/updated files for processing.")
+                logger.info("No new or updated files found.")
+                if progress_callback:
+                    progress_callback(1, 1)
+                return 0
 
-            # 4. Load, preprocess, and collect raw data from DataLoader
-            all_new_chunks_data = [] # Store raw return from DataLoader
-            total_files = len(files_to_process)
-            processed_file_count = 0
-            if progress_callback: progress_callback(0, total_files)
+            logger.info(f"Found {len(files_to_process)} files to refresh.")
+            if progress_callback:
+                progress_callback(0, len(files_to_process))
 
-            for i, file_path in enumerate(files_to_process):
+            # 4. Load & preprocess each file
+            all_new_chunks = []
+            for idx, file_path in enumerate(files_to_process, start=1):
                 if worker_is_running_flag and not worker_is_running_flag():
-                    logger.warning("Index refresh cancelled during file processing.")
-                    break # Stop processing further files
+                    logger.warning("Refresh cancelled mid-processing.")
+                    break
+
+                # ─── Skip zero‐byte files ───
+                if os.path.getsize(file_path) == 0:
+                    logger.warning(f"Skipping empty file {file_path}")
+                    continue
 
                 logger.debug(f"Processing file for refresh: {file_path}")
-                # Assuming self.dataloader is initialized correctly
-                if not self.dataloader: raise RuntimeError("DataLoader not initialized in IndexManager.")
                 try:
-                    # Store whatever DataLoader returns (e.g., list of tuples or list of dicts)
                     file_data = self.dataloader.load_and_preprocess_file(file_path)
                     if file_data:
-                        all_new_chunks_data.extend(file_data)
-                        logger.debug(f"Processed {len(file_data)} items from {file_path}")
+                        all_new_chunks.extend(file_data)
+                        logger.debug(f" → {len(file_data)} chunks from {file_path}")
                     else:
-                        logger.info(f"No processable data found in {file_path}")
-                except RejectedFileError: logger.info(f"Skipped rejected file type during refresh: {file_path}")
-                except Exception as load_err: logger.error(f"Failed to load/preprocess file {file_path} during refresh: {load_err}", exc_info=True)
+                        logger.info(f"No chunks from {file_path}")
+                except RejectedFileError:
+                    logger.info(f"Rejected file: {file_path}")
+                except Exception as e:
+                    logger.error(f"Error loading {file_path}: {e}", exc_info=True)
 
                 processed_file_count += 1
-                if progress_callback: progress_callback(processed_file_count, total_files)
+                if progress_callback:
+                    progress_callback(processed_file_count, len(files_to_process))
 
-            # Check cancellation flag again before adding documents
-            if worker_is_running_flag and not worker_is_running_flag():
-                 logger.warning("Index refresh cancelled before final document add.")
-                 return total_chunks_added # Return whatever might have been added before cancel
-
-            # 5. *** EXTRACT DICTIONARIES before adding ***
-            if all_new_chunks_data:
-                # --- ADJUST THIS LINE based on DataLoader output structure ---
-                # If DataLoader returns List[Tuple[metadata, chunk_dict]]:
-                docs_to_index = [chunk_dict for meta, chunk_dict in all_new_chunks_data if isinstance(chunk_dict, dict)]
-                # If DataLoader returns List[Dict]:
-                # docs_to_index = [item for item in all_new_chunks_data if isinstance(item, dict)]
-                # --- End Adjust ---
-
-                if not docs_to_index:
-                     logger.warning("No valid dictionaries found after processing files.")
-                     total_chunks_added = 0
-                else:
-                    logger.info(f"Adding {len(docs_to_index)} new/updated chunks to the index...")
-                    # Pass the correctly formatted list of dictionaries
+            # 5. Upsert all new chunks
+            if all_new_chunks:
+                docs_to_index = [
+                    chunk_dict for _, chunk_dict in all_new_chunks
+                    if isinstance(chunk_dict, dict)
+                ]
+                if docs_to_index:
+                    logger.info(f"Adding {len(docs_to_index)} chunks…")
                     total_chunks_added = self.add_documents(
-                        docs_to_index, # Pass the list of dicts
-                        progress_callback=None, # Progress was already reported per-file
+                        documents=docs_to_index,
+                        progress_callback=None,
                         worker_is_running_flag=worker_is_running_flag
                     )
+                else:
+                    logger.warning("No valid chunk dicts to add.")
             else:
-                 logger.info("No new valid chunks generated from files to add.")
-                 total_chunks_added = 0
+                logger.info("No new chunks generated.")
 
-        except InterruptedError as cancel_err: # Catch explicit cancellation
-            logger.warning(f"Index refresh cancelled: {cancel_err}")
-            # Let finally block handle cleanup, return count so far
+        except InterruptedError as cancel:
+            logger.warning(f"Index refresh cancelled: {cancel}")
         except Exception as e:
-            logger.error(f"Error during index refresh main loop: {e}", exc_info=True)
-            raise # Re-raise to be caught by worker
+            logger.error(f"Error in refresh_index: {e}", exc_info=True)
+            raise
 
-        logger.info(f"Index refresh finished. Added {total_chunks_added} chunks from {processed_file_count} files.")
+        logger.info(
+            f"Refresh complete. {total_chunks_added} chunks added "
+            f"from {processed_file_count} files."
+        )
         return total_chunks_added
-    
 
-    def rebuild_index(self, progress_callback: Optional[Callable[[int, int], None]] = None,
-                    worker_is_running_flag: Optional[Callable[[], bool]] = None) -> int:
+
+    def rebuild_index(
+        self,
+        progress_callback: Optional[Callable[[int, int], None]] = None,
+        worker_is_running_flag: Optional[Callable[[], bool]] = None
+    ) -> int:
         """
-        Deletes the existing collection, recreates it, and indexes all valid
-        documents found in the configured data directory.
-
-        Args:
-            progress_callback: Function to report progress (current, total).
-                               Progress reporting is approximate during phases.
-            worker_is_running_flag: Function to check if the calling worker is still running.
-
-        Returns:
-            The total number of chunks successfully added to the new index.
-
-        Raises:
-            RuntimeError: If critical errors occur (connection, collection creation, etc.).
-            InterruptedError: If cancellation is detected via worker_is_running_flag.
+        Deletes existing collection, recreates it, then indexes all files.
         """
-        logger.warning(f"---!!! Starting FULL Index Rebuild for collection: {self.collection_name} !!!---")
+        logger.warning(f"--- Starting FULL rebuild of '{self.collection_name}' ---")
         if not self.check_connection():
-            logger.error("Qdrant connection unavailable for rebuild.")
             raise RuntimeError("Qdrant connection unavailable for rebuild.")
 
+        # 1. Clear or delete existing collection
+        self.clear_index()
+
+        # 2. Gather all files under data_directory
+        data_dir = Path(self.config.data_directory)
+        all_files = []
+        if data_dir.is_dir():
+            for item in data_dir.rglob("*"):
+                if item.is_file() and not item.name.startswith("."):
+                    all_files.append(str(item))
+        else:
+            logger.warning(f"Data directory not found: {data_dir}")
+
+        if not all_files:
+            logger.info("No files found for rebuild.")
+            return 0
+
+        logger.info(f"Rebuilding index from {len(all_files)} files.")
         total_chunks_added = 0
-        processed_file_count = 0
 
-        # --- Define progress stages (approximate) ---
-        STAGE_DELETE = 0
-        STAGE_CREATE = 1
-        STAGE_SCAN = 2
-        STAGE_PREPROCESS = 3
-        STAGE_INDEX = 4
-        TOTAL_STAGES = 5 # Keep track of total stages for rough progress
+        # 3. Preprocess & collect chunks
+        all_chunks = []
+        for idx, file_path in enumerate(all_files, start=1):
+            if worker_is_running_flag and not worker_is_running_flag():
+                logger.warning("Rebuild cancelled.")
+                break
 
-        def report_stage_progress(stage_index, message):
-             if progress_callback:
-                  # Report progress as stages completed out of total stages
-                  progress_callback(stage_index, TOTAL_STAGES)
+            # ─── Skip zero‐byte files ───
+            if os.path.getsize(file_path) == 0:
+                logger.warning(f"Skipping empty file {file_path}")
+                continue
 
-        try:
-            # 1. Delete existing collection
-            report_stage_progress(STAGE_DELETE, f"Deleting existing index '{self.collection_name}'...")
-            logger.info(f"Attempting to delete existing collection: {self.collection_name}")
+            logger.debug(f"Preprocessing {file_path}")
             try:
-                # Add a check for cancellation before potentially long delete
-                if worker_is_running_flag and not worker_is_running_flag(): raise InterruptedError("Cancelled before delete.")
-                delete_result = self.client.delete_collection(collection_name=self.collection_name, timeout=120) # Longer timeout for delete
-                if delete_result: logger.info(f"Collection '{self.collection_name}' deleted successfully.")
-                else: logger.warning(f"Delete operation for '{self.collection_name}' returned False (may not have existed).")
-                time.sleep(2) # Brief pause
-            except Exception as delete_err:
-                 if "not found" in str(delete_err).lower() or "status_code=404" in str(delete_err):
-                     logger.info(f"Collection '{self.collection_name}' did not exist, proceeding.")
-                 else: # Re-raise other errors
-                     logger.error(f"Failed to delete collection '{self.collection_name}': {delete_err}", exc_info=True)
-                     raise RuntimeError(f"Failed to delete existing index: {delete_err}") from delete_err
+                file_data = self.dataloader.load_and_preprocess_file(file_path)
+                if file_data:
+                    all_chunks.extend(file_data)
+            except RejectedFileError:
+                logger.info(f"Rejected file: {file_path}")
+            except Exception as e:
+                logger.error(f"Error preprocessing {file_path}: {e}", exc_info=True)
 
-            if worker_is_running_flag and not worker_is_running_flag(): raise InterruptedError("Cancelled after delete.")
+            if progress_callback:
+                progress_callback(idx, len(all_files))
 
-            # 2. Re-create the collection
-            report_stage_progress(STAGE_CREATE, f"Creating new index '{self.collection_name}'...")
-            logger.info(f"Re-creating collection: {self.collection_name}")
-            try:
-                if self.vector_size is None: self.vector_size = self._get_embedding_dim() # Ensure size is known
-
-                # --- Quantization Config (same as _init_collection) ---
-                quant_config = None
-                if self.config.qdrant.quantization_enabled:
-                    logger.info("Scalar Quantization (int8) enabled for rebuild.")
-                    quant_config = models.ScalarQuantization(scalar=models.ScalarQuantizationConfig(
-                        type=models.ScalarType.INT8, quantile=0.99,
-                        always_ram=self.config.qdrant.quantization_always_ram))
-                 # --- End Quantization Config ---
-
-                vectors_config=models.VectorParams(
-                    size=self.vector_size,
-                    distance=models.Distance.COSINE, # Or from config
-                    quantization_config=quant_config
+        # 4. Upsert all collected chunks
+        if all_chunks:
+            docs_to_index = [
+                chunk_dict for _, chunk_dict in all_chunks
+                if isinstance(chunk_dict, dict)
+            ]
+            if docs_to_index:
+                logger.info(f"Adding {len(docs_to_index)} chunks to new index…")
+                total_chunks_added = self.add_documents(
+                    documents=docs_to_index,
+                    progress_callback=progress_callback,
+                    worker_is_running_flag=worker_is_running_flag
                 )
-                # Use recreate_collection for safety, timeout might need adjustment
-                self.client.recreate_collection(
-                    collection_name=self.collection_name,
-                    vectors_config=vectors_config,
-                    timeout=60
-                )
-                logger.info(f"Collection '{self.collection_name}' created successfully.")
-            except Exception as create_err:
-                logger.error(f"Failed to create collection '{self.collection_name}': {create_err}", exc_info=True)
-                raise RuntimeError(f"Failed to create new index: {create_err}") from create_err
-
-            if worker_is_running_flag and not worker_is_running_flag(): raise InterruptedError("Cancelled after create.")
-
-            # 3. Gather all local files
-            report_stage_progress(STAGE_SCAN, "Scanning data directory...")
-            logger.info("Gathering all local files for rebuild...")
-            data_dir = Path(self.config.data_directory)
-            all_files_to_index = []
-            if data_dir.is_dir():
-                 rejected_folder = self.config.rejected_docs_foldername
-                 # Use iterator for potentially large directories
-                 file_iterator = data_dir.rglob('*')
-                 scan_count = 0
-                 for item in file_iterator:
-                      # Check cancellation frequently during scan
-                      if scan_count % 100 == 0 and worker_is_running_flag and not worker_is_running_flag():
-                           raise InterruptedError("Cancelled during file scan.")
-                      scan_count += 1
-
-                      is_rejected = False; 
-                      try: 
-                        is_rejected = rejected_folder in item.parent.parts; 
-                      except Exception: continue
-                      if is_rejected: continue
-                      if item.is_file() and not item.name.startswith('.'):
-                           if os.access(item, os.R_OK): all_files_to_index.append(str(item))
-                           else: logging.warning(f"Cannot access file during rebuild scan: {item}")
             else:
-                 logger.warning(f"Data directory '{data_dir}' not found for rebuild.")
+                logger.warning("No valid chunks to add after preprocessing.")
 
-            if not all_files_to_index:
-                 logger.info("No local files found to index during rebuild.")
-                 report_stage_progress(TOTAL_STAGES, "Rebuild complete (no files found).")
-                 return 0 # Nothing to add
-
-            logger.info(f"Found {len(all_files_to_index)} local files to index.")
-            if worker_is_running_flag and not worker_is_running_flag(): raise InterruptedError("Cancelled after scan.")
-
-            # 4. Process files and get chunks
-            report_stage_progress(STAGE_PREPROCESS, f"Preprocessing {len(all_files_to_index)} files...")
-            logger.info(f"Preprocessing {len(all_files_to_index)} local files...")
-            if not self.dataloader: raise RuntimeError("DataLoader not initialized.")
-
-            all_chunks_data = [] # Store raw output from DataLoader
-            total_files = len(all_files_to_index)
-            processed_file_count = 0
-            for i, file_path in enumerate(all_files_to_index):
-                 if worker_is_running_flag and not worker_is_running_flag(): raise InterruptedError("Cancelled during file preprocessing.")
-                 # Report progress based on files preprocessed
-                 if progress_callback: progress_callback(i, total_files)
-                 # Update status less frequently for preprocessing stage
-                 if i % 10 == 0 or i == total_files - 1:
-                      report_stage_progress(STAGE_PREPROCESS, f"Preprocessing {i+1}/{total_files}...")
-                 try:
-                      file_data = self.dataloader.load_and_preprocess_file(file_path)
-                      if file_data: all_chunks_data.extend(file_data)
-                 except RejectedFileError: logger.info(f"Skipped rejected file type during rebuild: {file_path}")
-                 except Exception as load_err: logger.error(f"Failed to preprocess file {file_path} during rebuild: {load_err}", exc_info=True) # Log error but continue
-                 processed_file_count += 1 # Count even if error occurred during its processing
-
-            if worker_is_running_flag and not worker_is_running_flag(): raise InterruptedError("Cancelled after preprocessing.")
-
-            # 5. Extract dictionaries and add all chunks
-            report_stage_progress(STAGE_INDEX, "Indexing content chunks...")
-            if all_chunks_data:
-                 # --- EXTRACT DICTIONARIES ---
-                 # Adjust based on actual DataLoader return type
-                 docs_to_index = [chunk_dict for meta, chunk_dict in all_chunks_data if isinstance(chunk_dict, dict)]
-                 # --- END EXTRACT ---
-
-                 if not docs_to_index:
-                      logger.warning("No valid chunks generated during rebuild preprocessing.")
-                 else:
-                      logger.info(f"Adding {len(docs_to_index)} chunks to the new index...")
-                      report_stage_progress(STAGE_INDEX, f"Indexing {len(docs_to_index)} content chunks...")
-                      # Pass progress callback for chunk-level progress during add
-                      total_chunks_added = self.add_documents(
-                          documents=docs_to_index,
-                          progress_callback=progress_callback, # Use the main callback here
-                          total_items=len(docs_to_index), # Total is number of chunks
-                          worker_is_running_flag=worker_is_running_flag
-                      )
-            else:
-                 logger.warning("No chunks generated during rebuild preprocessing.")
-                 total_chunks_added = 0
-
-        except InterruptedError as cancel_err:
-            logger.warning(f"Index rebuild cancelled: {cancel_err}")
-            # Re-raise to be caught by worker
-            raise
-        except Exception as e:
-            logger.error(f"Error during index rebuild main loop: {e}", exc_info=True)
-            # Re-raise to be caught by worker
-            raise
-
-        report_stage_progress(TOTAL_STAGES, "Rebuild complete.")
-        logger.warning(f"--- Index Rebuild Finished. Added {total_chunks_added} chunks from {processed_file_count} files processed. ---")
-        return total_chunks_added # Return number of chunks added
-
-    # --- END ADD THIS REBUILD METHOD ---
+        logger.warning(f"Rebuild complete. {total_chunks_added} chunks added.")
+        return total_chunks_added

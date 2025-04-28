@@ -1,4 +1,4 @@
-# File: scripts/embedding_utils.py (Original/Current)
+# File: scripts/embedding_utils.py 
 
 import logging
 from sentence_transformers import SentenceTransformer

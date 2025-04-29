@@ -1,55 +1,54 @@
-# File: scripts/embedding_utils.py 
+# In scripts/indexing/embedding_utils.py
 
 import logging
-from sentence_transformers import SentenceTransformer
 import torch
+from sentence_transformers import SentenceTransformer
 
 logger = logging.getLogger(__name__)
 
 class CustomSentenceTransformer(SentenceTransformer):
     def __init__(self, model_name: str, *args, **kwargs):
-        """
-        Custom wrapper around SentenceTransformer to handle device selection.
-        Uses CUDA if available, otherwise defaults to CPU. Device is set ONCE here.
-        """
-        # Set device (GPU if available)
         device = "cuda" if torch.cuda.is_available() else "cpu"
         logging.info(f"Initializing CustomSentenceTransformer '{model_name}' on {device}")
-
-        # Check if 'device' is already in kwargs, warn if overriding?
-        if 'device' in kwargs and kwargs['device'] != device:
-            logging.warning(f"Overriding provided device '{kwargs['device']}' with auto-detected '{device}'")
-
-        kwargs["device"] = device  # Explicitly pass determined device to the superclass
+        kwargs["device"] = device
         super().__init__(model_name, *args, **kwargs)
-
-        # self.device is managed by the parent class via the passed kwarg
         self.model_name = model_name
-        # No need to log success again, parent class likely does or init would fail
 
     def get_sentence_embedding_dimension(self) -> int:
         """Returns the dimensionality of the sentence embeddings."""
-        # Check if model loaded successfully before encoding
-        if not self._target_device: # Check internal attribute if available
-             logging.error("Model seems not loaded correctly, cannot get dimension.")
-             return -1 # Indicate error
+        if not getattr(self, "_target_device", None):
+            logging.error("Model seems not loaded correctly, cannot get dimension.")
+            return -1
 
         try:
-            # Encode a dummy sentence to infer dimension
-            # Ensure convert_to_tensor=False if you need numpy array shape access
-            # Or handle tensor shape access
-            test_embedding = self.encode("Example sentence", convert_to_tensor=True) # Or False
-            if hasattr(test_embedding, 'shape') and len(test_embedding.shape) > 0:
-                dimension = test_embedding.shape[-1]
-                # logging.debug(f"Inferred dimension for {self.model_name}: {dimension}")
-                return dimension
-            elif isinstance(test_embedding, list) and len(test_embedding) > 0: # Handle potential list output
-                 # Assuming list of vectors, get dim from first one
-                 if hasattr(test_embedding[0], 'shape') and len(test_embedding[0].shape) > 0:
-                     return test_embedding[0].shape[-1]
-                 elif isinstance(test_embedding[0], (int, float)): # List of numbers? Less likely
-                     return len(test_embedding[0])
-            raise ValueError(f"Could not determine dimension from embedding structure: {type(test_embedding)}")
+            # Attempt on current device
+            try:
+                with torch.no_grad():
+                    test_embedding = super().encode(
+                        "Example sentence", convert_to_tensor=True
+                    )
+            except RuntimeError as e:
+                if "out of memory" in str(e).lower():
+                    logging.warning("GPU OOM – retrying on CPU")
+                    self.to("cpu")
+                    with torch.no_grad():
+                        test_embedding = super().encode(
+                            "Example sentence", convert_to_tensor=True, device="cpu"
+                        )
+                else:
+                    raise
+
+            # Infer dimension from tensor or list
+            if hasattr(test_embedding, "shape") and len(test_embedding.shape) > 0:
+                return test_embedding.shape[-1]
+            elif isinstance(test_embedding, list) and test_embedding:
+                first = test_embedding[0]
+                if hasattr(first, "shape") and len(first.shape) > 0:
+                    return first.shape[-1]
+                elif isinstance(first, (int, float)):
+                    return len(test_embedding)
+            raise ValueError(f"Unexpected embedding structure: {type(test_embedding)}")
+
         except Exception as e:
             logging.error(f"Error getting embedding dimension for {self.model_name}: {e}", exc_info=True)
-            return -1 # Return error code
+            return -1

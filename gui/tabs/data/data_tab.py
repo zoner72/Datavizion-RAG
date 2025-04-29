@@ -47,6 +47,10 @@ class BaseWorker(QObject):
         thread = self.thread()
         if thread and thread.isRunning():
             thread.quit()
+        if not thread.wait(5000):
+            logger.warning(f"Thread {thread.objectName()} did not quit; forcing terminate.")
+            thread.terminate()
+            thread.wait()
 
     def run(self):
         raise NotImplementedError("Subclasses must implement run()")
@@ -81,6 +85,10 @@ class IndexWorker(BaseWorker):
         thread = self.thread()
         if thread and thread.isRunning():
             thread.quit()
+        if not thread.wait(5000):
+            logger.warning(f"Thread {thread.objectName()} did not quit; forcing terminate.")
+            thread.terminate()
+            thread.wait()
 
     def run(self):
         """
@@ -136,6 +144,10 @@ class IndexWorker(BaseWorker):
             if thread and thread.isRunning():
                 logger.debug("IndexWorker run() finished; quitting thread.")
                 thread.quit()
+                if not thread.wait(5000):
+                    logger.warning(f"Thread {thread.objectName()} did not quit; forcing terminate.")
+                    thread.terminate()
+                    thread.wait()
 
 
 class ScrapeWorker(BaseWorker):
@@ -169,6 +181,10 @@ class ScrapeWorker(BaseWorker):
         thread = self.thread()
         if thread and thread.isRunning():
             thread.quit()
+            if not thread.wait(5000):
+                logger.warning(f"Thread {thread.objectName()} did not quit; forcing terminate.")
+                thread.terminate()
+                thread.wait()
 
     def run(self):
         thread = self.thread()
@@ -240,6 +256,10 @@ class ScrapeWorker(BaseWorker):
             # **always** quit the thread so GUI reset runs
             if thread and thread.isRunning():
                 thread.quit()
+                if not thread.wait(5000):
+                    logger.warning(f"Thread {thread.objectName()} did not quit; forcing terminate.")
+                    thread.terminate()
+                    thread.wait()
 
 
 class PDFDownloadWorker(BaseWorker):
@@ -258,6 +278,10 @@ class PDFDownloadWorker(BaseWorker):
         thread = self.thread()
         if thread and thread.isRunning():
             thread.quit()
+            if not thread.wait(5000):
+                logger.warning(f"Thread {thread.objectName()} did not quit; forcing terminate.")
+                thread.terminate()
+                thread.wait()
 
     def run(self):
         thread = self.thread()
@@ -323,6 +347,10 @@ class PDFDownloadWorker(BaseWorker):
             # Always quit the thread so GUI reset runs
             if thread and thread.isRunning():
                 thread.quit()
+                if not thread.wait(5000):
+                    logger.warning(f"Thread {thread.objectName()} did not quit; forcing terminate.")
+                    thread.terminate()
+                    thread.wait()
 
 class LocalFileScanWorker(BaseWorker):
     finished = pyqtSignal(int)
@@ -1048,6 +1076,10 @@ class DataTab(QWidget):
 
                 logger.debug(f"Requesting thread {attr_name} to quit event loop.")
                 thread.quit()
+                if not thread.wait(5000):
+                    logger.warning(f"Thread {thread.objectName()} did not quit; forcing terminate.")
+                    thread.terminate()
+                    thread.wait()
                 logger.debug(f"Waiting for thread {attr_name} to finish...")
                 if not thread.wait(5000):
                     logger.error(f"Thread {attr_name} did not stop gracefully after 5s. Terminating.")

@@ -1,6 +1,6 @@
 import logging
 from pathlib import Path
-from typing import Optional, Dict, Any, Union
+from typing import List, Optional, Dict, Any, Union
 from pydantic import BaseModel, Field, field_validator, ValidationError, Extra
 import json
 
@@ -79,6 +79,19 @@ class QdrantConfig(BaseModel):
         default=False,
         description="If true, drop and recreate collection on every startup"
     )
+    connection_retries: int = Field(
+        default=3,
+        description="Number of times to retry Qdrant connection on init"
+    )
+    connection_initial_delay: int = Field(
+        default=1,
+        description="Initial delay (seconds) between Qdrant connection retries"
+    )
+    client_timeout: int = Field(
+        default=20,
+        description="Timeout (seconds) for Qdrant client operations"
+    )
+    
 
 class ApiServerConfig(BaseModel):
     host: str = Field(
@@ -187,6 +200,10 @@ class MainConfig(BaseModel):
     gpt4all_model_path: Optional[Path] = Field(
         default=None,
         description="Filesystem path to a local GPT4All model"
+    )
+    gpt4all_api_url: Optional[str] = Field(
+        default=None,
+        description="Base URL for a GPT4All-compatible API server"
     )
 
     # Paths
@@ -339,6 +356,14 @@ class MainConfig(BaseModel):
     gui: Dict[str, Any] = Field(
         default_factory=lambda: {"log_path": "default_log_path"},
         description="Additional GUI-specific settings"
+    )
+    metadata_extraction_level: str = Field(
+        default="basic",
+        description="Metadata extraction level; options: 'basic' or 'enhanced'"
+    )
+    metadata_fields_to_extract: List[str] = Field(
+        default_factory=list,
+        description="Which metadata fields to extract when in 'enhanced' mode"
     )
 
     @field_validator('embedding_model_query', mode='before')

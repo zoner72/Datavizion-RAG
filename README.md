@@ -1,9 +1,8 @@
-   ```markdown
-   # Your Project
+# Your Project
 
-   ## Version
-   <!-- VERSION_PLACEHOLDER -->
-   ```
+## Version
+<!-- VERSION_PLACEHOLDER -->
+
 Datavizion
 =========
 

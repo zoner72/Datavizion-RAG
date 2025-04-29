@@ -1,9 +1,8 @@
-# Your Project
+# Datavizion
 
 ## Version
 <!-- VERSION_PLACEHOLDER -->
 
-Datavizion
 =========
 
 Overview

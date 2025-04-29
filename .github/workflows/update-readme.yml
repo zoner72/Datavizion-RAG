@@ -1,19 +1,26 @@
- ```yaml
-   name: Update README with version
-   on:
-     push:
-       branches:
-         - main  # or your default branch
-   jobs:
-     update-readme:
-       runs-on: ubuntu-latest
-       steps:
-         - name: Checkout code
-           uses: actions/checkout@v3
+name: Update README with version
 
-         - name: Set version from file
-           run: |
-             VERSION=$(python version.py | grep '__version__' | awk -F'=' '{print $2}' | tr -d '"')
-             echo "## Version" >> README.md
-             echo "```$VERSION``"` >> README.md
-   ```
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  update-readme:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v3
+      with:
+        persist-credentials: true
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.x'
+
+    - name: Read version from version.py
+      id: get_version
+      run: |
+        VER=$(python - <<'EOF'

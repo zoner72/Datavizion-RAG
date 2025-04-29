@@ -1,3 +1,5 @@
+Release 0.1.1 - 28/4/2025
+
 Datavizion
 =========
 

@@ -107,6 +107,29 @@ class ApiServerConfig(BaseModel):
         description="If true, start the API server automatically on app launch"
     )
 
+class NormalProfileConfig(BaseModel):
+    chunk_size: int = Field(
+        default=300,
+        description="Number of tokens per chunk in 'normal' indexing profile"
+    )
+    chunk_overlap: int = Field(
+        default=150,
+        description="Overlap (tokens) between chunks in 'normal' profile"
+    )
+    enable_advanced_cleaning: bool = Field(
+        default=False,
+        description="If true, run extra cleaning steps on text"
+    )
+    boilerplate_removal: bool = Field(
+        default=False,
+        description="Remove common boilerplate sections when cleaning"
+    )
+    ocr_enabled_if_needed: bool = Field(
+        default=False,
+        description="Run OCR on image-only PDFs if no text found"
+    )
+
+
 class IntenseProfileConfig(BaseModel):
     chunk_size: int = Field(
         default=150,
@@ -233,6 +256,9 @@ class MainConfig(BaseModel):
         default="normal",
         description="Indexing mode; options: 'normal' or 'intense'"
     )
+    normal: NormalProfileConfig = Field(default_factory=NormalProfileConfig) # Attribute named 'normal'  # noqa: F821
+    intense: IntenseProfileConfig = Field(default_factory=IntenseProfileConfig) # Attribute named 'intense'
+
     chunk_size: int = Field(
         default=300,
         description="Number of tokens per chunk in 'normal' profile"

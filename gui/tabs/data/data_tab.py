@@ -32,11 +32,11 @@ class BaseWorker(QObject):
     statusUpdate = pyqtSignal(str)
     progress = pyqtSignal(int, int)
 
-    def __init__(self, config: MainConfig, main_window_ref):
+    def __init__(self, config: MainConfig, main_window):
         super().__init__()
         self.config = config
-        self.main_window_ref = main_window_ref
-        self.index_manager = getattr(main_window_ref, 'index_manager', None)
+        self.main_window = main_window
+        self.index_manager = getattr(main_window, 'index_manager', None)
         self._is_running = True
 
     @pyqtSlot()
@@ -66,8 +66,8 @@ class IndexWorker(BaseWorker):
     #   statusUpdate: pyqtSignal(str)
     #   progress: pyqtSignal(int, int)
 
-    def __init__(self, config, main_window_ref, mode: str, file_paths=None):
-        super().__init__(config, main_window_ref)
+    def __init__(self, config, main_window, mode: str, file_paths=None):
+        super().__init__(config, main_window)
         self.mode = mode
         self.file_paths = file_paths or []
 
@@ -157,13 +157,13 @@ class ScrapeWorker(BaseWorker):
     def __init__(
         self,
         config: MainConfig,
-        main_window_ref,
+        main_window,
         url: str,
         mode: str = 'text',
         pdf_log_path: Path | None = None,
         output_dir: Path | None = None
     ):
-        super().__init__(config, main_window_ref)
+        super().__init__(config, main_window)
         self.url = url
         self.mode = mode
         self.pdf_log_path = pdf_log_path
@@ -193,7 +193,7 @@ class ScrapeWorker(BaseWorker):
                 self.error.emit("Scraping cancelled before start.")
                 return
 
-            project_root = getattr(self.main_window_ref, 'project_root',
+            project_root = getattr(self.main_window, 'project_root',
                                    Path(__file__).resolve().parents[3])
             script_path = project_root / "scripts/ingest/scrape_pdfs.py"
             if not script_path.exists():
@@ -266,8 +266,8 @@ class PDFDownloadWorker(BaseWorker):
     finished = pyqtSignal(object)
     progress = pyqtSignal(int, int)
 
-    def __init__(self, config, main_window_ref, pdf_links: list[str]):
-        super().__init__(config, main_window_ref)
+    def __init__(self, config, main_window, pdf_links: list[str]):
+        super().__init__(config, main_window)
         self.pdf_links = pdf_links
         self._session = requests.Session()
 
@@ -354,8 +354,8 @@ class PDFDownloadWorker(BaseWorker):
 
 class LocalFileScanWorker(BaseWorker):
     finished = pyqtSignal(int)
-    def __init__(self, config: MainConfig, main_window_ref):
-        super().__init__(config, main_window_ref)
+    def __init__(self, config: MainConfig, main_window):
+        super().__init__(config, main_window)
 
     def run(self):
         if not self._is_running: return
@@ -393,8 +393,8 @@ class LocalFileScanWorker(BaseWorker):
 
 class IndexStatsWorker(BaseWorker):
     finished = pyqtSignal(int, str, str)
-    def __init__(self, config: MainConfig, main_window_ref):
-        super().__init__(config, main_window_ref)
+    def __init__(self, config: MainConfig, main_window):
+        super().__init__(config, main_window)
         if not self.index_manager:
             QTimer.singleShot(0, lambda: self.error.emit("Index manager not available for stats."))
             self._is_running = False
@@ -942,8 +942,8 @@ class DataTab(QWidget):
 
                 # 5) Update the main window statusbar LLM and Index Count (Live fetch from Qdrant)
                 try:
-                    if hasattr(self.main_window_ref, "index_manager") and self.main_window_ref.index_manager:
-                        live_vector_count = self.main_window_ref.index_manager.count()
+                    if hasattr(self.main_window, "index_manager") and self.main_window.index_manager:
+                        live_vector_count = self.main_window.index_manager.count()
                         self.indexStatusUpdate.emit(f"Ready ({live_vector_count:,} vectors)")
                     else:
                         self.indexStatusUpdate.emit("Ready")
@@ -951,8 +951,8 @@ class DataTab(QWidget):
                     logger.error(f"Error fetching live vector count: {e}")
                     self.indexStatusUpdate.emit("Ready")
 
-                if hasattr(self.main_window_ref, "update_llm_status"):
-                    self.main_window_ref.update_llm_status("Ready")
+                if hasattr(self.main_window, "update_llm_status"):
+                    self.main_window.update_llm_status("Ready")
 
 
             worker.finished.connect(on_index_finished)

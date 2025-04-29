@@ -10,8 +10,9 @@ class CustomSentenceTransformer(SentenceTransformer):
     def __init__(self, model_name: str, *args, **kwargs):
         device = "cuda" if torch.cuda.is_available() else "cpu"
         logging.info(f"Initializing CustomSentenceTransformer '{model_name}' on {device}")
-        kwargs["device"] = device
-        super().__init__(model_name, *args, **kwargs)
+        final_kwargs = {'device': device, 'trust_remote_code': True}
+        final_kwargs.update(kwargs)
+        super().__init__(model_name, *args, **final_kwargs)
         self.model_name = model_name
 
     def get_sentence_embedding_dimension(self) -> int:

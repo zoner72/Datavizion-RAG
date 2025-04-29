@@ -1,4 +1,4 @@
-# File: scripts/ingest/data_loader.py
+# --- START OF FILE scripts/ingest/data_loader.py ---
 
 import logging
 import os
@@ -6,31 +6,32 @@ import fitz # PyMuPDF
 import docx # python-docx
 import nltk
 import re
-import hashlib # Added for doc_id generation
-from typing import Dict, List, Tuple, Any, Optional # Added Optional
+import hashlib
+from typing import Dict, List, Tuple, Any, Optional
 import sys
 from pathlib import Path
 
 # --- Pydantic Config Import ---
 try:
-    project_root_dir = Path(__file__).resolve().parents[2] # Adjust if structure differs
+    project_root_dir = Path(__file__).resolve().parents[2]
     if str(project_root_dir) not in sys.path:
         sys.path.insert(0, str(project_root_dir))
-    from config_models import MainConfig # Import Pydantic model
+    from config_models import MainConfig # Assumes MainConfig exists
     pydantic_available = True
 except ImportError as e:
     logging.critical(f"FATAL ERROR: Cannot import Pydantic models in DataLoader: {e}. Ingestion will fail.", exc_info=True)
     pydantic_available = False
-    class MainConfig: pass
+    class MainConfig: pass # Dummy
 
-# --- Optional Transformer Import for Tokenization ---
+# --- Optional Transformer Import ---
 try:
-    from transformers import AutoTokenizer
+    from transformers import AutoTokenizer, PreTrainedTokenizerBase
     transformers_available = True
     logging.info("Transformers library found, enabling token-based chunking.")
 except ImportError:
     transformers_available = False
-    AutoTokenizer = None # Define as None to prevent NameErrors
+    AutoTokenizer = None
+    PreTrainedTokenizerBase = None # Define base type as None
     logging.warning("Transformers library not found ('pip install transformers'). Chunking will use word counts as fallback.")
 
 # --- Preprocessing Utils Import ---
@@ -44,7 +45,7 @@ try:
 except ImportError as e:
     logging.critical(f"DataLoader failed to import preprocessing_utils: {e}", exc_info=True)
     PREPROCESSING_UTILS_AVAILABLE = False
-    # Define dummy functions if utils are critical and import failed
+    # Define dummy functions if import fails
     def basic_clean_text(t, **kwargs): return t
     def advanced_clean_text(t, **kwargs): return t
     def remove_boilerplate(t, **kwargs): return t
@@ -55,329 +56,499 @@ except ImportError as e:
 # --- Constants ---
 SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".txt", ".md"}
 logger = logging.getLogger(__name__)
-# Use a relatively fast, common tokenizer for chunking if specific one isn't needed/available
-DEFAULT_TOKENIZER_FOR_CHUNKING = "gpt2"
+DEFAULT_TOKENIZER_FOR_CHUNKING = "gpt2" # Fallback if model tokenizer fails
+DEFAULT_MAX_SEQ_LENGTH = 512 # Default if not specified or derivable
 
 class RejectedFileError(Exception):
     """Custom exception for files rejected during processing."""
     pass
 
+# =============================================
+# Helper Function for Recursive Text Splitting
+# (No changes needed here from previous version)
+# =============================================
+def _split_text_recursively(
+    text: str,
+    tokenizer: Optional[PreTrainedTokenizerBase],
+    max_length: int,
+    overlap: int
+) -> List[str]:
+    """Splits text recursively if its token count exceeds max_length."""
+    # ... (Implementation remains the same as provided previously) ...
+    if not text or not text.strip(): return []
+    current_length = 0
+    if tokenizer:
+        try: current_length = len(tokenizer.encode(text, add_special_tokens=False, truncation=False))
+        except Exception as e: logger.warning(f"Tokenizer failed len check: {e}"); current_length = len(text.split())
+    else: current_length = len(text.split())
+    if current_length <= max_length: return [text]
+    logger.debug(f"Splitting segment len {current_length} (max: {max_length})")
+    split_point = -1
+    if '.' in text or '?' in text or '!' in text: # Try sentence split
+        try:
+            sentences = nltk.sent_tokenize(text)
+            if len(sentences) > 1:
+                 first_half = sentences[:len(sentences)//2]; second_half = sentences[len(sentences)//2:]
+                 first_text = " ".join(first_half)
+                 first_len = len(tokenizer.encode(first_text, add_special_tokens=False)) if tokenizer else len(first_text.split())
+                 if 0 < first_len < max_length: split_point = len(first_text); logger.debug("Split by sentence.")
+        except Exception as e_nltk: logger.warning(f"NLTK split failed: {e_nltk}")
+    if split_point == -1: # Try double newline
+        mid = len(text) // 2; best_split = -1; min_dist = float('inf')
+        for match in re.finditer(r'\n\s*\n', text):
+            dist = abs(match.start() - mid)
+            if dist < min_dist: min_dist = dist; best_split = match.end()
+        if best_split != -1: split_point = best_split; logger.debug("Split by double newline.")
+    if split_point == -1: # Try single newline
+        mid = len(text) // 2; best_split = -1; min_dist = float('inf')
+        for match in re.finditer(r'[.!?]\s*\n|\n', text):
+             dist = abs(match.start() - mid)
+             if dist < min_dist: min_dist = dist; best_split = match.end()
+        if best_split != -1: split_point = best_split; logger.debug("Split by single newline.")
+    if split_point == -1: # Try whitespace
+        mid = len(text) // 2; left = text.rfind(' ', 0, mid); right = text.find(' ', mid)
+        if left == -1 and right == -1: split_point = mid; logger.warning("Forcing mid-split.")
+        elif left == -1: split_point = right
+        elif right == -1: split_point = left
+        else: split_point = left if (mid - left) < (right - mid) else right
+        split_point += 1; logger.debug("Split by whitespace.")
+    left_text = text[:split_point].strip(); right_text = text[split_point:].strip()
+    if not left_text or not right_text: logger.warning(f"Recursive split ineffective."); return [text]
+    return _split_text_recursively(left_text, tokenizer, max_length, overlap) + \
+           _split_text_recursively(right_text, tokenizer, max_length, overlap)
+
+
+# =============================================
+# DataLoader Class
+# =============================================
 class DataLoader:
-    """Loads, preprocesses, and chunks documents based on configuration profiles."""
+    """Loads, preprocesses, and chunks documents based on configuration."""
 
     def __init__(self, config: MainConfig):
-        """Initializes the DataLoader with Pydantic configuration and tokenizer."""
+        """Initializes the DataLoader with configuration and tokenizer."""
         if not pydantic_available:
             raise RuntimeError("DataLoader cannot function without Pydantic models.")
 
-        self.config = config # Store the MainConfig object
-        self.tokenizer = None # Initialize tokenizer attribute
+        self.config = config
+        self.tokenizer: Optional[PreTrainedTokenizerBase] = None
+        self.max_seq_length: int = DEFAULT_MAX_SEQ_LENGTH # Default
 
         if not PREPROCESSING_UTILS_AVAILABLE:
-             logger.error("DataLoader initialized, but preprocessing utilities are UNAVAILABLE.")
+             logger.error("Preprocessing utilities unavailable.")
 
         self._ensure_nltk_punkt()
 
-        # --- Load Tokenizer ---
+        # --- Load Tokenizer and Determine Max Sequence Length ---
         if transformers_available and AutoTokenizer:
-            tokenizer_name = config.embedding_model_index or DEFAULT_TOKENIZER_FOR_CHUNKING
+            # Use the tokenizer specified for indexing embeddings
+            tokenizer_name = self.config.embedding_model_index or DEFAULT_TOKENIZER_FOR_CHUNKING
             try:
-                # Load tokenizer specified for indexing, or fallback
-                logger.info(f"Attempting to load tokenizer for chunking: '{tokenizer_name}'")
-                # trust_remote_code=True might be needed for some models
+                logger.info(f"Attempting to load tokenizer '{tokenizer_name}'...")
+                # Add trust_remote_code=True if needed by the tokenizer model
                 self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name, trust_remote_code=True)
-                logger.info(f"Successfully loaded tokenizer '{tokenizer_name}' for chunking.")
+                logger.info(f"Tokenizer '{tokenizer_name}' loaded successfully.")
+                print(f"[DataLoader Init] Tokenizer loaded: {self.tokenizer is not None}") # Debug print
+
+                # Determine max_seq_length from config > tokenizer > default
+                config_max_len = getattr(self.config, 'embedding_model_max_seq_length', None)
+                tokenizer_max_len = getattr(self.tokenizer, 'model_max_length', 0)
+
+                if config_max_len and isinstance(config_max_len, int) and config_max_len > 0:
+                    self.max_seq_length = config_max_len
+                    logger.info(f"Using max_seq_length from config: {self.max_seq_length}")
+                elif tokenizer_max_len > 0 and tokenizer_max_len < 100_000: # Sanity check tokenizer value
+                    self.max_seq_length = tokenizer_max_len
+                    logger.info(f"Using max_seq_length from tokenizer: {self.max_seq_length}")
+                else:
+                    self.max_seq_length = DEFAULT_MAX_SEQ_LENGTH
+                    logger.warning(f"Using default max_seq_length: {self.max_seq_length}")
+
+                print(f"[DataLoader Init] Max seq length set to: {self.max_seq_length}") # Debug print
+
             except Exception as e:
-                logger.warning(f"Failed to load tokenizer '{tokenizer_name}': {e}. Falling back to word counts for chunking.")
+                # Log failure and fallback
+                print(f"[DataLoader Init] Tokenizer load FAILED: {e}") # Debug print
+                logger.warning(f"Failed to load tokenizer '{tokenizer_name}': {e}. Falling back.")
                 self.tokenizer = None
+                self.max_seq_length = DEFAULT_MAX_SEQ_LENGTH
         else:
-            logger.warning("Transformers library not available. Using word counts for chunking.")
+            # Log if transformers library is unavailable
+            logger.warning("Transformers library unavailable. Using word counts and default max length.")
+            self.tokenizer = None
+            self.max_seq_length = DEFAULT_MAX_SEQ_LENGTH
+        # --- End Tokenizer Loading ---
 
 
     def _ensure_nltk_punkt(self):
-        """Checks for NLTK punkt tokenizer and downloads if missing."""
-        try: nltk.data.find('tokenizers/punkt'); logger.debug("NLTK 'punkt' found.")
+        """Downloads NLTK 'punkt' tokenizer if not found."""
+        try:
+            nltk.data.find('tokenizers/punkt')
+            logger.debug("NLTK 'punkt' resource found.")
         except LookupError:
             logger.info("NLTK 'punkt' not found, attempting download...")
-            try: nltk.download('punkt', quiet=True); nltk.data.find('tokenizers/punkt'); logger.info("NLTK 'punkt' download successful.")
-            except Exception as e: logger.warning(f"NLTK 'punkt' download failed: {e}. Fallback may be used.", exc_info=False)
+            try:
+                nltk.download('punkt', quiet=True)
+                nltk.data.find('tokenizers/punkt') # Verify download
+                logger.info("NLTK 'punkt' download successful.")
+            except Exception as e:
+                logger.warning(f"NLTK 'punkt' download failed: {e}. Sentence splitting may be affected.", exc_info=False)
 
-    # --- Main Processing Function ---
+    # --- Main Processing Function (Simplified - uses self.config directly) ---
     def load_and_preprocess_file(self, file_path: str) -> List[Tuple[str, Dict]]:
         """
-        Loads, preprocesses, chunks (token-based if possible), and extracts metadata for a single file.
-        Includes a stable doc_id based on file path hash.
+        Loads, preprocesses, chunks, and extracts metadata for a single file.
+        Relies on self.config containing the correct (potentially profile-merged) settings.
         """
         short_filename = os.path.basename(file_path)
         logger.info(f"Processing START: {short_filename} ({file_path})")
         p_file_path = Path(file_path)
 
-        # --- 0. Pre-checks & Stable Doc ID ---
-        if not p_file_path.is_file() or not os.access(str(p_file_path), os.R_OK):
-            raise FileNotFoundError(f"File not found or cannot be read: {file_path}")
+        # --- Step 0: Pre-checks & Document ID ---
+        if not p_file_path.is_file():
+            raise FileNotFoundError(f"File not found: {file_path}")
+        if not os.access(str(p_file_path), os.R_OK):
+            raise PermissionError(f"Cannot read file: {file_path}")
 
-        # Generate stable document ID based on resolved file path
+        doc_id = ""
+        resolved_path_str = ""
         try:
             resolved_path_str = str(p_file_path.resolve())
             doc_id = hashlib.sha256(resolved_path_str.encode('utf-8')).hexdigest()
-            logger.debug(f"Generated stable doc_id: {doc_id} for {short_filename}")
+            logger.debug(f"Generated stable doc_id: {doc_id}")
         except Exception as hash_e:
-            logger.error(f"Failed to generate doc_id hash for {short_filename}: {hash_e}", exc_info=True)
-            raise RuntimeError(f"Failed to generate stable document ID for {file_path}") from hash_e
+            raise RuntimeError(f"Failed to generate doc_id hash for {file_path}") from hash_e
 
         rejected_folder_name = self.config.rejected_docs_foldername
         try:
             if rejected_folder_name in p_file_path.parent.parts:
-                logger.info(f"SKIP rejected (in '{rejected_folder_name}' dir): {short_filename}")
                 raise RejectedFileError(f"File in rejected folder '{rejected_folder_name}'")
         except Exception as path_e:
-            logger.warning(f"Error checking rejected folder path for {short_filename}: {path_e}")
             raise RejectedFileError(f"Failed rejected folder check: {path_e}")
 
         extension = p_file_path.suffix.lower()
         if extension not in SUPPORTED_EXTENSIONS:
-            raise RejectedFileError(f"Unsupported extension '{extension}'")
+            raise RejectedFileError(f"Unsupported file extension '{extension}'")
+        # --- End Step 0 ---
 
-        # --- Get settings ---
-        active_profile_name = self.config.indexing_profile
-        active_profile_config = getattr(self.config, active_profile_name, None)
+        # --- Get Effective Settings Directly from self.config ---
+        # Assumes self.config was correctly initialized (potentially merged in worker)
+        logger.debug(f"Using settings from config (profile: '{self.config.indexing_profile}')")
+        enable_advanced_cleaning = getattr(self.config, 'enable_advanced_cleaning', False)
+        boilerplate_removal = getattr(self.config, 'boilerplate_removal', False)
+        metadata_level = getattr(self.config, 'metadata_extraction_level', 'basic')
+        metadata_fields = getattr(self.config, 'metadata_fields_to_extract', [])
+        prepend_metadata = getattr(self.config, 'prepend_metadata_to_chunk', False)
+        effective_chunk_size = getattr(self.config, 'chunk_size', 300)
+        effective_chunk_overlap = getattr(self.config, 'chunk_overlap', 100)
+        internal_max_seq_length = self.max_seq_length # Use value from __init__
 
-        def get_effective_setting(attr_name: str, default: Any = None) -> Any:
-            profile_val = None
-            if active_profile_config and hasattr(active_profile_config, attr_name):
-                profile_val = getattr(active_profile_config, attr_name)
-            return profile_val if profile_val is not None else getattr(self.config, attr_name, default)
-
-        enable_advanced_cleaning = get_effective_setting('enable_advanced_cleaning', False)
-        boilerplate_removal = get_effective_setting('boilerplate_removal', False)
-        metadata_level = get_effective_setting('metadata_extraction_level', 'basic')
-        metadata_fields = get_effective_setting('metadata_fields_to_extract', [])
-        prepend_metadata = get_effective_setting('prepend_metadata_to_chunk', False)
-        effective_chunk_size = get_effective_setting('chunk_size', 200)
-        effective_chunk_overlap = get_effective_setting('chunk_overlap', 100)
-
-        # --- 1. Load raw content ---
-        raw_text = ''; load_exception = None
-        logger.debug(f"Loading raw content for {short_filename}...")
+        # --- Step 1: Load Raw Content ---
+        logger.debug(f"Loading raw content ({extension})...")
+        raw_text = ""
         try:
             if extension == ".pdf": raw_text = self.extract_pdf_hybrid(file_path)
             elif extension == ".docx": raw_text = self.extract_text_from_docx(file_path)
             else: raw_text = self.extract_text_from_txt(file_path)
-        except Exception as load_e: load_exception = load_e
-        if load_exception: raise RuntimeError(f"Load text fail: {load_exception}") from load_exception
-        if not raw_text.strip(): raise RejectedFileError("No text content extracted")
-        logger.debug(f"Raw text length: {len(raw_text)}")
+        except Exception as load_e:
+            raise RuntimeError(f"Failed text load for {short_filename}") from load_e
+        if not raw_text or not raw_text.strip():
+            raise RejectedFileError(f"No text extracted from {short_filename}")
+        logger.debug(f"Raw text loaded (length: {len(raw_text)} chars).")
+        # --- End Step 1 ---
 
-        # --- 2. Clean text ---
+        # --- Step 2: Clean Text ---
+        logger.debug("Cleaning text...")
         cleaned_text = raw_text
         try:
-            if boilerplate_removal and PREPROCESSING_UTILS_AVAILABLE: cleaned_text = remove_boilerplate(cleaned_text)
-            if enable_advanced_cleaning and PREPROCESSING_UTILS_AVAILABLE: cleaned_text = advanced_clean_text(cleaned_text)
-            if not enable_advanced_cleaning and not boilerplate_removal: cleaned_text = basic_clean_text(cleaned_text)
-            if not cleaned_text.strip(): raise RejectedFileError("Text empty after cleaning")
-        except Exception as clean_e: raise RuntimeError(f"Clean fail: {clean_e}") from clean_e
+            if boilerplate_removal and PREPROCESSING_UTILS_AVAILABLE:
+                cleaned_text = remove_boilerplate(cleaned_text)
+            if enable_advanced_cleaning and PREPROCESSING_UTILS_AVAILABLE:
+                cleaned_text = advanced_clean_text(cleaned_text)
+            if not PREPROCESSING_UTILS_AVAILABLE or (not enable_advanced_cleaning and not boilerplate_removal):
+                cleaned_text = basic_clean_text(cleaned_text)
+            if not cleaned_text or not cleaned_text.strip():
+                raise RejectedFileError(f"Text empty after cleaning {short_filename}")
+            logger.debug(f"Text cleaned (length: {len(cleaned_text)} chars).")
+        except Exception as clean_e:
+            raise RuntimeError(f"Cleaning failed for {short_filename}") from clean_e
+        # --- End Step 2 ---
 
-        # --- 3. Extract Metadata (Including stable doc_id) ---
-        metadata = {}
+        # --- Step 3: Extract Base Metadata ---
+        logger.debug(f"Extracting metadata (Level: {metadata_level})...")
+        base_metadata = {}
         try:
-            if metadata_level == "enhanced" and PREPROCESSING_UTILS_AVAILABLE: metadata = extract_enhanced_metadata(file_path, cleaned_text, metadata_fields)
-            else: metadata = extract_basic_metadata(file_path, cleaned_text)
+            if metadata_level == "enhanced" and PREPROCESSING_UTILS_AVAILABLE:
+                base_metadata = extract_enhanced_metadata(resolved_path_str, cleaned_text, metadata_fields)
+            else:
+                base_metadata = extract_basic_metadata(resolved_path_str, cleaned_text)
         except Exception as meta_e:
-            logger.error(f"Error extracting metadata: {meta_e}", exc_info=True)
-            metadata = {"error_extracting_metadata": str(meta_e)}
-        # --- Add essential metadata INCLUDING doc_id ---
-        metadata.update({
-            "doc_id": doc_id, # Add the stable document ID here
-            "source_filepath": resolved_path_str, # Store resolved path
-            "filename": short_filename,
-            "indexing_profile": active_profile_name,
-            "inferred_doc_type": self._infer_doc_type(file_path),
-            "inferred_linked_to": self._infer_linked_to(file_path)
+            logger.error(f"Metadata extraction failed: {meta_e}", exc_info=True)
+            base_metadata = {"error_extracting_metadata": str(meta_e)}
+
+        # Add essential derived metadata
+        base_metadata.update({
+             "doc_id": doc_id,
+             "source_filepath": resolved_path_str,
+             "filename": short_filename,
+             "indexing_profile": self.config.indexing_profile,
+             "inferred_doc_type": self._infer_doc_type(file_path),
+             "inferred_linked_to": self._infer_linked_to(file_path)
         })
+        logger.debug("Base metadata prepared.")
+        # --- End Step 3 ---
 
-        # --- 4. Chunk text (Pass tokenizer) ---
+        # --- Step 4: Chunk Text ---
         chunking_unit = "tokens" if self.tokenizer else "words (fallback)"
-        logger.debug(f"Chunking text (Size: {effective_chunk_size}, Overlap: {effective_chunk_overlap} in {chunking_unit}) for {short_filename}...")
+        logger.debug(f"Chunking text (Size: {effective_chunk_size}, Overlap: {effective_chunk_overlap} {chunking_unit}, MaxSeqLen: {internal_max_seq_length})...")
         try:
-            # Pass the loaded tokenizer (or None) to the chunking function
-            chunk_dicts = self.chunk_text(cleaned_text, effective_chunk_size, effective_chunk_overlap, self.tokenizer)
-            if not chunk_dicts: raise RejectedFileError("Chunking yielded zero chunks")
-            # Ensure all items are dictionaries
-            chunk_dicts = [({"text": c} if isinstance(c, str) else c) for c in chunk_dicts]
-        except Exception as chunk_e: raise RuntimeError(f"Chunk fail: {chunk_e}") from chunk_e
+            chunk_dicts = self.chunk_text(
+                cleaned_text, effective_chunk_size, effective_chunk_overlap,
+                self.tokenizer, internal_max_seq_length
+            )
+            if not chunk_dicts:
+                raise RejectedFileError(f"Chunking yielded zero chunks for {short_filename}")
+        except Exception as chunk_e:
+            logger.error(f"Chunking failed: {chunk_e}", exc_info=True)
+            raise RuntimeError(f"Chunking failed for {file_path}") from chunk_e
+        # --- End Step 4 ---
 
-        # --- 5. Build final chunk list ---
-        final_chunks = []
+        # --- Step 5: Build Final Chunk List with Merged Metadata ---
+        logger.debug(f"Finalizing {len(chunk_dicts)} chunks with metadata...")
+        final_chunks: List[Tuple[str, Dict]] = []
         for i, chunk_dict in enumerate(chunk_dicts):
-            text = chunk_dict.get("text", "").strip()
-            if not text: continue
-            chunk_meta = metadata.copy() # Start with base file metadata (including doc_id)
-            chunk_meta.update(chunk_dict.get("metadata", {})) # Add chunk-specific metadata (like table info)
-            # Generate a unique ID for this specific chunk based on doc_id and index
-            # This ID will be used as the Qdrant point ID
-            chunk_meta["chunk_id"] = f"{doc_id}_{i}"
-            chunk_meta.update({
-                "chunk_index": i,
-                "chunk_token_count": chunk_dict.get("token_count", 0) # Use token count from chunker
-            })
+            text = chunk_dict.get("text", "")
+            if not text or not text.strip(): continue # Skip empty chunks
+
+            chunk_meta = base_metadata.copy()
+            chunk_meta.update(chunk_dict.get("metadata", {})) # Add chunk specific meta (e.g., table)
+            chunk_meta["chunk_index"] = i
+            chunk_meta["chunk_id"] = f"{doc_id}_{i}" # Generate unique point ID
+            token_count = chunk_dict.get("token_count", 0)
+            if token_count > 0: chunk_meta["chunk_token_count"] = token_count
+
             text_for_embedding = text
             if prepend_metadata:
-                prefix = f"Type: {chunk_meta['inferred_doc_type']} "
+                prefix = f"Source: {chunk_meta['filename']} | Type: {chunk_meta['inferred_doc_type']} | Chunk: {i} | "
                 text_for_embedding = prefix + text
-            # The tuple structure remains: (filepath, chunk_dict) - filepath is informational here
-            # The chunk_dict contains the text, context text, and all merged metadata (incl. doc_id and chunk_id)
+
             final_chunks.append((resolved_path_str, {
                 "text": text,
                 "text_with_context": text_for_embedding,
                 "metadata": chunk_meta
             }))
-        logger.info(f"Processing FINISH: {short_filename}, Generated {len(final_chunks)} chunks.")
+        # --- End Step 5 ---
+
+        logger.info(f"Processing FINISH: {short_filename}. Generated {len(final_chunks)} final chunks.")
         return final_chunks
 
-    # --- Extraction methods remain the same ---
+    # --- Extraction Methods ---
     def extract_pdf_hybrid(self, file_path: str) -> str:
-        logger.debug(f"Extracting text from PDF: {os.path.basename(file_path)}")
-        text_content = ""; doc = None
+        """Extracts text from PDF, returns empty string on failure or if image-only/encrypted."""
+        short_filename = os.path.basename(file_path)
+        logger.debug(f"Extracting text from PDF: {short_filename}")
+        text_content = ""
+        doc = None
         try:
             import fitz as pymupdf_local
             doc = pymupdf_local.open(file_path)
-            if doc.is_encrypted: logger.warning(f"Skip encrypted PDF: {os.path.basename(file_path)}"); return ""
-            for page_num in range(len(doc)): text_content += doc.load_page(page_num).get_text("text", sort=True) + "\n"
-        except pymupdf_local.FileDataError as fd_err: logger.error(f"[FileDataError] PDF {os.path.basename(file_path)}: {fd_err}"); return ""
-        except Exception as e: logger.error(f"[ExtractionError] PDF {os.path.basename(file_path)}: {e}"); return ""
+            if doc.is_encrypted and not doc.authenticate(""):
+                logger.warning(f"REJECTING encrypted PDF: {short_filename}")
+                return ""
+            if len(doc) == 0:
+                 logger.warning(f"REJECTING PDF with zero pages: {short_filename}")
+                 return ""
+
+            has_text = False
+            for page_num in range(len(doc)):
+                page = doc.load_page(page_num)
+                page_text = page.get_text("text", sort=True)
+                if page_text and page_text.strip():
+                    has_text = True
+                    text_content += page_text + "\n"
+                # else: logger.debug(f"Page {page_num+1} in {short_filename} has no text.")
+
+            if not has_text:
+                 logger.warning(f"REJECTING PDF - No text found on any page (potentially image-only): {short_filename}")
+                 return ""
+
+        except ImportError: logger.error("PyMuPDF (fitz) missing."); return ""
+        except Exception as e: logger.error(f"PDF extraction error ({short_filename}): {e}"); return ""
         finally:
              if doc:
                 try: doc.close()
-                except Exception as close_e: logger.warning(f"Error closing PDF {os.path.basename(file_path)}: {close_e}")
+                except Exception: pass # Ignore close errors
+
+        if not text_content.strip(): # Final check
+             logger.warning(f"REJECTING PDF - Extracted text empty: {short_filename}")
+             return ""
+
+        logger.debug(f"Text extracted from PDF: {short_filename} (Length: {len(text_content)})")
         return text_content
 
     def extract_text_from_docx(self, file_path: str) -> str:
-        logger.debug(f"Extracting text from DOCX: {os.path.basename(file_path)}")
-        try: doc = docx.Document(file_path); return "\n".join([para.text for para in doc.paragraphs])
-        except Exception as e: logger.error(f"Error DOCX {os.path.basename(file_path)}: {e}"); return ""
+        """Extracts text from DOCX, returns empty string on failure."""
+        short_filename = os.path.basename(file_path)
+        logger.debug(f"Extracting text from DOCX: {short_filename}")
+        try:
+            import docx
+            document = docx.Document(file_path)
+            full_text = [para.text for para in document.paragraphs if para.text]
+            content = "\n".join(full_text)
+            if not content.strip(): logger.warning(f"REJECTING DOCX - No text found: {short_filename}") ; return ""
+            logger.debug(f"Text extracted from DOCX: {short_filename} (Length: {len(content)})")
+            return content
+        except ImportError: logger.error("python-docx missing."); return ""
+        except Exception as e: logger.error(f"DOCX extraction error ({short_filename}): {e}"); return ""
 
     def extract_text_from_txt(self, file_path: str) -> str:
-        logger.debug(f"Extracting text from TXT/MD: {os.path.basename(file_path)}")
-        encodings_to_try = ['utf-8', 'latin-1', 'windows-1252']
-        for enc in encodings_to_try:
+        """Extracts text from TXT/MD, trying multiple encodings."""
+        short_filename = os.path.basename(file_path)
+        logger.debug(f"Extracting text from TXT/MD: {short_filename}")
+        encodings = ['utf-8', 'latin-1', 'windows-1252']
+        for enc in encodings:
             try:
-                with open(file_path, "r", encoding=enc) as file: return file.read()
-            except UnicodeDecodeError: continue
-            except Exception as e: logger.error(f"Error TXT {os.path.basename(file_path)} enc {enc}: {e}"); return ""
-        logger.warning(f"Could not decode {os.path.basename(file_path)}. Trying byte decode.")
+                with open(file_path, "r", encoding=enc) as f: content = f.read()
+                if not content.strip(): logger.warning(f"REJECTING TXT - File empty or whitespace only ({enc}): {short_filename}") ; return ""
+                logger.debug(f"Text extracted from TXT ({enc}): {short_filename} (Length: {len(content)})")
+                return content
+            except UnicodeDecodeError: continue # Try next encoding
+            except Exception as e: logger.error(f"TXT read error ({enc}, {short_filename}): {e}"); return ""
+        # Fallback: byte decode
+        logger.warning(f"Standard decodes failed for {short_filename}. Trying byte decode.")
         try:
-            with open(file_path, "rb") as file: return file.read().decode('utf-8', errors='replace')
-        except Exception as e: logger.error(f"Failed byte decode {os.path.basename(file_path)}: {e}"); return ""
+            with open(file_path, "rb") as f: raw_bytes = f.read()
+            content = raw_bytes.decode('utf-8', errors='replace')
+            if not content.strip(): logger.warning(f"REJECTING TXT - Byte decoded content empty: {short_filename}"); return ""
+            logger.debug(f"Text extracted from TXT (byte decode): {short_filename} (Length: {len(content)})")
+            return content
+        except Exception as e: logger.error(f"TXT byte decode failed ({short_filename}): {e}"); return ""
 
-    # --- Updated Chunking Function ---
-    def chunk_text(self, text: str, chunk_size: int, chunk_overlap: int, tokenizer: Optional[Any]) -> List[Dict]:
-        """Chunks text, prioritizing token counts if a tokenizer is provided."""
-        chunks = []
-        if not text or not text.strip(): return chunks
 
-        # Use tokenizer if available, otherwise fallback to word count
-        use_tokens = tokenizer is not None
-        unit = "tokens" if use_tokens else "words"
+    # --- Chunking Function ---
+    def chunk_text(
+        self,
+        text: str,
+        chunk_size: int,
+        chunk_overlap: int,
+        tokenizer: Optional[PreTrainedTokenizerBase],
+        max_seq_length: int
+        ) -> List[Dict]:
+        """Chunks text, splitting oversized units first, then combining respecting limits."""
+        final_chunks: List[Dict] = []
+        if not text or not text.strip(): logger.warning("chunk_text received empty input."); return final_chunks
+        use_tokens = tokenizer is not None; unit_name = "tokens" if use_tokens else "words"
 
-        def get_length(text_segment: str) -> int:
-            if not text_segment: return 0
+        def get_length(text_segment: str) -> int: # Helper to get length
+            if not text_segment or not text_segment.strip(): return 0
             if use_tokens:
-                try: return len(tokenizer.encode(text_segment, add_special_tokens=False))
-                except Exception as e: logger.warning(f"Tokenizer failed for segment, using word count fallback: {e}"); return len(text_segment.split()) # Fallback inside
+                try: return len(tokenizer.encode(text_segment, add_special_tokens=False, truncation=False))
+                except Exception as e: logger.warning(f"Tokenizer len check failed: {e}"); return len(text_segment.split())
             else: return len(text_segment.split())
 
-        # Handle table blocks separately (keep original logic)
+        # Step 1: Separate Tables
         table_blocks = self._extract_table_blocks(text)
         non_table_text = self._remove_table_blocks(text)
+        processed_units: List[Tuple[str, bool]] = [] # (text, is_table)
 
-        # Sentence splitting (keep original logic)
-        try: sentences = nltk.sent_tokenize(non_table_text); logger.debug(f"Chunking {len(sentences)} sentences (NLTK).")
-        except Exception:
-            logger.warning("NLTK sent_tokenize fail. Fallback split."); sentences = [s for s in re.split(r'\n\s*\n', non_table_text) if s.strip()]
-            if len(sentences) <= 1: sentences = [s for s in non_table_text.splitlines() if s.strip()]
-            if not sentences: sentences = [non_table_text] if non_table_text.strip() else []
+        # Step 2: Initial Sentence Split
+        initial_units: List[str] = []
+        if non_table_text and non_table_text.strip():
+            try: initial_units = nltk.sent_tokenize(non_table_text)
+            except Exception as e_nltk: logger.warning(f"NLTK split failed: {e_nltk}. Falling back."); initial_units = [s for s in re.split(r'\n\s*\n', non_table_text) if s and s.strip()] # etc...
+            if not initial_units and non_table_text.strip(): initial_units = [non_table_text]
+        for unit in initial_units:
+            if unit and unit.strip(): processed_units.append((unit, False))
+        for i, table_text in enumerate(table_blocks):
+            cleaned_table = table_text.strip()
+            if cleaned_table: processed_units.append((cleaned_table, True)); logger.debug(f"Table block {i} identified.")
 
-        current_chunk_sentences: List[str] = []
+        # Step 3: Pre-split units > max_seq_length
+        split_units: List[Tuple[str, bool]] = []
+        logger.debug(f"Pre-splitting {len(processed_units)} units > {max_seq_length} {unit_name}...")
+        split_count = 0
+        for unit_text, is_table in processed_units:
+            sub_units = _split_text_recursively(unit_text, tokenizer, max_seq_length, chunk_overlap)
+            if len(sub_units) > 1: split_count += 1
+            for sub_unit in sub_units:
+                 if sub_unit and sub_unit.strip(): split_units.append((sub_unit, is_table))
+        if split_count > 0: logger.info(f"Split {split_count} oversized units.")
+        logger.debug(f"Units after pre-splitting: {len(split_units)}")
+
+        # Step 4: Combine into final chunks
+        current_chunk_units: List[str] = []
         current_chunk_len: int = 0
-        sentence_lengths: List[int] = [get_length(s) for s in sentences] # Precompute lengths
+        current_chunk_contains_table: bool = False
+        unit_lengths: List[int] = [get_length(unit_text) for unit_text, _ in split_units] # Precompute lengths
 
-        for i, sentence in enumerate(sentences):
-            sentence_len = sentence_lengths[i]
-            if sentence_len == 0: continue
+        for i, (unit_text, is_table) in enumerate(split_units):
+            unit_len = unit_lengths[i]
+            if unit_len == 0: continue
 
-            # If adding this sentence exceeds chunk size, finalize the previous chunk
-            if current_chunk_len > 0 and current_chunk_len + sentence_len > chunk_size:
-                chunk_text = " ".join(current_chunk_sentences).strip()
+            if current_chunk_len > 0 and current_chunk_len + unit_len > chunk_size: # Finalize previous chunk
+                chunk_text = " ".join(current_chunk_units).strip()
                 if chunk_text:
-                    # Re-calculate final length accurately if using tokens
                     final_chunk_len = get_length(chunk_text)
-                    chunks.append({"text": chunk_text, "token_count": final_chunk_len, "metadata": {"contains_table": False}})
-                    logger.debug(f"Created chunk ({len(chunks)}) with {final_chunk_len} {unit}.")
+                    if final_chunk_len > 0:
+                         final_chunks.append({"text": chunk_text, "token_count": final_chunk_len, "metadata": {"contains_table": current_chunk_contains_table}})
 
-                # Calculate overlap target length
-                overlap_target_len = int(chunk_overlap) if chunk_size > 0 else 0 # Overlap is direct value now
+                overlap_units: List[str] = [] # Calculate overlap
+                overlap_len = 0; overlap_target = int(chunk_overlap)
+                for j in range(len(current_chunk_units) - 1, -1, -1):
+                    idx_in_split = i - (len(current_chunk_units) - j)
+                    len_of_prev_unit = unit_lengths[idx_in_split]
+                    if overlap_len < overlap_target or not overlap_units:
+                        overlap_units.insert(0, current_chunk_units[j])
+                        overlap_len += len_of_prev_unit
+                    else: break
 
-                # Determine sentences for overlap
-                overlap_sentences: List[str] = []
-                accumulated_overlap_len = 0
-                # Iterate backwards through the sentences *just added* to the finalized chunk
-                for j in range(len(current_chunk_sentences) - 1, -1, -1):
-                    sent_idx_in_original = i - (len(current_chunk_sentences) - j) # Index in original sentences list
-                    sent_len = sentence_lengths[sent_idx_in_original]
-                    if accumulated_overlap_len < overlap_target_len or not overlap_sentences: # Keep at least one sentence for overlap
-                        overlap_sentences.insert(0, current_chunk_sentences[j]) # Prepend to maintain order
-                        accumulated_overlap_len += sent_len
-                    else: break # Stop once overlap target is met/exceeded
+                current_chunk_units = overlap_units + [unit_text] # Start new chunk
+                current_chunk_len = sum(unit_lengths[k] for k, (ut, _) in enumerate(split_units) if ut in current_chunk_units)
+                current_chunk_contains_table = any(it for k, (ut, it) in enumerate(split_units) if ut in current_chunk_units)
+            else: # Add to current chunk
+                current_chunk_units.append(unit_text)
+                current_chunk_len += unit_len
+                if is_table: current_chunk_contains_table = True
 
-                # Start new chunk with overlap sentences + current sentence
-                current_chunk_sentences = overlap_sentences + [sentence]
-                current_chunk_len = sum(sentence_lengths[k] for k, s in enumerate(sentences) if s in current_chunk_sentences) # Recalculate length
-
-            else: # Doesn't exceed, just add the sentence
-                current_chunk_sentences.append(sentence)
-                current_chunk_len += sentence_len
-
-        # Add the last remaining chunk
-        if current_chunk_sentences:
-            chunk_text = " ".join(current_chunk_sentences).strip()
+        # Add the last chunk
+        if current_chunk_units:
+            chunk_text = " ".join(current_chunk_units).strip()
             if chunk_text:
                 final_chunk_len = get_length(chunk_text)
-                chunks.append({"text": chunk_text, "token_count": final_chunk_len, "metadata": {"contains_table": False}})
-                logger.debug(f"Created final chunk ({len(chunks)}) with {final_chunk_len} {unit}.")
+                if final_chunk_len > 0:
+                     final_chunks.append({"text": chunk_text, "token_count": final_chunk_len, "metadata": {"contains_table": current_chunk_contains_table}})
 
-        # Add table blocks (calculate length)
-        for i, table_text in enumerate(table_blocks):
-            cleaned_table_text = table_text.strip()
-            if cleaned_table_text:
-                table_len = get_length(cleaned_table_text)
-                chunks.append({"text": cleaned_table_text, "token_count": table_len, "metadata": {"contains_table": True, "table_index": i}})
-                logger.debug(f"Added table block chunk ({len(chunks)}) with {table_len} {unit}.")
-
-        # Filter out any potentially empty chunks (shouldn't happen often with new logic)
-        final_chunks = [c for c in chunks if c.get("text")]; logger.debug(f"Chunking produced {len(final_chunks)} final chunks.")
+        logger.info(f"Chunking produced {len(final_chunks)} final chunks.")
         return final_chunks
 
-    # --- Helper methods remain the same ---
+    # --- Helper methods ---
     def _extract_table_blocks(self, text: str) -> list[str]:
+        """Extracts content between [TABLE START] and [TABLE END] tags."""
         try: return re.findall(r"\[TABLE START\](.*?)\[TABLE END\]", text, re.DOTALL | re.IGNORECASE)
-        except Exception as e: logger.warning(f"Error extracting table blocks: {e}"); return []
+        except Exception as e: logger.warning(f"Table block extraction failed: {e}"); return []
 
     def _remove_table_blocks(self, text: str) -> str:
+        """Removes [TABLE START]...[TABLE END] blocks from text."""
         try: return re.sub(r"\[TABLE START\].*?\[TABLE END\]", "", text, flags=re.DOTALL | re.IGNORECASE).strip()
-        except Exception as e: logger.warning(f"Error removing table blocks: {e}"); return text
+        except Exception as e: logger.warning(f"Table block removal failed: {e}"); return text
 
     def _infer_linked_to(self, file_path: str) -> str:
+        """Infers related component from filename."""
         try:
-            filename = os.path.basename(file_path).lower()
-            if "strain" in filename: return "strain_gauge"
-            if "daq" in filename: return "daq"
+            fn = os.path.basename(file_path).lower()
+            if "strain" in fn or "sg" in fn: return "strain_gauge"
+            if "daq" in fn or "dataq" in fn: return "daq"
+            if "sensor" in fn: return "sensor"
             return "generic_component"
         except Exception: return "generic_component"
 
     def _infer_doc_type(self, file_path: str) -> str:
+        """Infers document type from filename."""
         try:
-            filename = os.path.basename(file_path).lower()
-            if "manual" in filename: return "manual"
-            if "spec" in filename: return "specification"
+            fn = os.path.basename(file_path).lower()
+            if "manual" in fn: return "manual"
+            if "spec" in fn or "specification" in fn or "datasheet" in fn: return "specification"
+            if "catalog" in fn: return "catalog"
+            if "tutorial" in fn or "guide" in fn: return "guide"
+            if "report" in fn: return "report"
             return "unknown"
         except Exception: return "unknown"

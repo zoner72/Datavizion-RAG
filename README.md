@@ -1,5 +1,9 @@
-Release 0.1.1 - 28/4/2025
+   ```markdown
+   # Your Project
 
+   ## Version
+   <!-- VERSION_PLACEHOLDER -->
+   ```
 Datavizion
 =========
 

@@ -1,0 +1,17 @@
+   name: Update README with version
+   on:
+     push:
+       branches:
+         - main  # or your default branch
+   jobs:
+     update-readme:
+       runs-on: ubuntu-latest
+       steps:
+         - name: Checkout code
+           uses: actions/checkout@v3
+
+         - name: Set version from file
+           run: |
+             VERSION=$(python version.py | grep '__version__' | awk -F'=' '{print $2}' | tr -d '"')
+             echo "## Version" >> README.md
+             echo "```$VERSION``"` >> README.md

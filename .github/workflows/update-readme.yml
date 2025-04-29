@@ -1,3 +1,4 @@
+ ```yaml
    name: Update README with version
    on:
      push:
@@ -15,3 +16,4 @@
              VERSION=$(python version.py | grep '__version__' | awk -F'=' '{print $2}' | tr -d '"')
              echo "## Version" >> README.md
              echo "```$VERSION``"` >> README.md
+   ```

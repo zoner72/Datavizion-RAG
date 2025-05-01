@@ -6,6 +6,7 @@ import sys
 import os
 import subprocess
 import time
+from typing import Optional
 from urllib.parse import urlparse
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QMessageBox, QTableWidgetItem, QFileDialog, QApplication)
 from PyQt6.QtCore import pyqtSignal, QTimer, QThread, QObject, Qt, QMetaObject, Q_ARG, pyqtSlot
@@ -32,11 +33,11 @@ class BaseWorker(QObject):
     statusUpdate = pyqtSignal(str)
     progress = pyqtSignal(int, int)
 
-    def __init__(self, config: MainConfig, main_window_ref):
+    def __init__(self, config: MainConfig, main_window):
         super().__init__()
         self.config = config
-        self.main_window_ref = main_window_ref
-        self.index_manager = getattr(main_window_ref, 'index_manager', None)
+        self.main_window = main_window
+        self.index_manager = getattr(main_window, 'index_manager', None)
         self._is_running = True
 
     @pyqtSlot()
@@ -47,6 +48,11 @@ class BaseWorker(QObject):
         thread = self.thread()
         if thread and thread.isRunning():
             thread.quit()
+        if not thread.wait(5000):
+            logger.warning(f"Thread {thread.objectName()} did not quit; forcing terminate.")
+            thread.terminate()
+            if thread and thread.isRunning() and thread != QThread.currentThread():
+                thread.wait()
 
     def run(self):
         raise NotImplementedError("Subclasses must implement run()")
@@ -62,8 +68,8 @@ class IndexWorker(BaseWorker):
     #   statusUpdate: pyqtSignal(str)
     #   progress: pyqtSignal(int, int)
 
-    def __init__(self, config, main_window_ref, mode: str, file_paths=None):
-        super().__init__(config, main_window_ref)
+    def __init__(self, config, main_window, mode: str, file_paths=None):
+        super().__init__(config, main_window)
         self.mode = mode
         self.file_paths = file_paths or []
 
@@ -81,6 +87,11 @@ class IndexWorker(BaseWorker):
         thread = self.thread()
         if thread and thread.isRunning():
             thread.quit()
+        if not thread.wait(5000):
+            logger.warning(f"Thread {thread.objectName()} did not quit; forcing terminate.")
+            thread.terminate()
+            if thread and thread.isRunning() and thread != QThread.currentThread():
+                thread.wait()
 
     def run(self):
         """
@@ -136,6 +147,11 @@ class IndexWorker(BaseWorker):
             if thread and thread.isRunning():
                 logger.debug("IndexWorker run() finished; quitting thread.")
                 thread.quit()
+                if not thread.wait(5000):
+                    logger.warning(f"Thread {thread.objectName()} did not quit; forcing terminate.")
+                    thread.terminate()
+                    if thread and thread.isRunning() and thread != QThread.currentThread():
+                        thread.wait()
 
 
 class ScrapeWorker(BaseWorker):
@@ -145,13 +161,13 @@ class ScrapeWorker(BaseWorker):
     def __init__(
         self,
         config: MainConfig,
-        main_window_ref,
+        main_window,
         url: str,
         mode: str = 'text',
         pdf_log_path: Path | None = None,
         output_dir: Path | None = None
     ):
-        super().__init__(config, main_window_ref)
+        super().__init__(config, main_window)
         self.url = url
         self.mode = mode
         self.pdf_log_path = pdf_log_path
@@ -169,6 +185,11 @@ class ScrapeWorker(BaseWorker):
         thread = self.thread()
         if thread and thread.isRunning():
             thread.quit()
+            if not thread.wait(5000):
+                logger.warning(f"Thread {thread.objectName()} did not quit; forcing terminate.")
+                thread.terminate()
+                if thread and thread.isRunning() and thread != QThread.currentThread():
+                    thread.wait()
 
     def run(self):
         thread = self.thread()
@@ -177,7 +198,7 @@ class ScrapeWorker(BaseWorker):
                 self.error.emit("Scraping cancelled before start.")
                 return
 
-            project_root = getattr(self.main_window_ref, 'project_root',
+            project_root = getattr(self.main_window, 'project_root',
                                    Path(__file__).resolve().parents[3])
             script_path = project_root / "scripts/ingest/scrape_pdfs.py"
             if not script_path.exists():
@@ -240,14 +261,19 @@ class ScrapeWorker(BaseWorker):
             # **always** quit the thread so GUI reset runs
             if thread and thread.isRunning():
                 thread.quit()
+                if not thread.wait(5000):
+                    logger.warning(f"Thread {thread.objectName()} did not quit; forcing terminate.")
+                    thread.terminate()
+                    if thread and thread.isRunning() and thread != QThread.currentThread():
+                        thread.wait()
 
 
 class PDFDownloadWorker(BaseWorker):
     finished = pyqtSignal(object)
     progress = pyqtSignal(int, int)
 
-    def __init__(self, config, main_window_ref, pdf_links: list[str]):
-        super().__init__(config, main_window_ref)
+    def __init__(self, config, main_window, pdf_links: list[str]):
+        super().__init__(config, main_window)
         self.pdf_links = pdf_links
         self._session = requests.Session()
 
@@ -258,6 +284,11 @@ class PDFDownloadWorker(BaseWorker):
         thread = self.thread()
         if thread and thread.isRunning():
             thread.quit()
+            if not thread.wait(5000):
+                logger.warning(f"Thread {thread.objectName()} did not quit; forcing terminate.")
+                thread.terminate()
+                if thread and thread.isRunning() and thread != QThread.currentThread():
+                    thread.wait()
 
     def run(self):
         thread = self.thread()
@@ -323,11 +354,16 @@ class PDFDownloadWorker(BaseWorker):
             # Always quit the thread so GUI reset runs
             if thread and thread.isRunning():
                 thread.quit()
+                if not thread.wait(5000):
+                    logger.warning(f"Thread {thread.objectName()} did not quit; forcing terminate.")
+                    thread.terminate()
+                    if thread and thread.isRunning() and thread != QThread.currentThread():
+                        thread.wait()
 
 class LocalFileScanWorker(BaseWorker):
     finished = pyqtSignal(int)
-    def __init__(self, config: MainConfig, main_window_ref):
-        super().__init__(config, main_window_ref)
+    def __init__(self, config: MainConfig, main_window):
+        super().__init__(config, main_window)
 
     def run(self):
         if not self._is_running: return
@@ -365,8 +401,8 @@ class LocalFileScanWorker(BaseWorker):
 
 class IndexStatsWorker(BaseWorker):
     finished = pyqtSignal(int, str, str)
-    def __init__(self, config: MainConfig, main_window_ref):
-        super().__init__(config, main_window_ref)
+    def __init__(self, config: MainConfig, main_window):
+        super().__init__(config, main_window)
         if not self.index_manager:
             QTimer.singleShot(0, lambda: self.error.emit("Index manager not available for stats."))
             self._is_running = False
@@ -417,7 +453,12 @@ class DataTab(QWidget):
     indexStatusUpdate = pyqtSignal(str)
     qdrantConnectionStatus = pyqtSignal(str)
 
-    def __init__(self, config: MainConfig, parent=None, project_root: Path | None = None):
+    def __init__(
+        self,
+        config: MainConfig,
+        project_root: Path,
+        parent: Optional[QWidget] = None
+    ):
         super().__init__(parent)
         logger.debug("Initializing DataTab UI...")
 
@@ -682,7 +723,14 @@ class DataTab(QWidget):
                                      Q_ARG(int, value), Q_ARG(int, total))
             return
 
-        if not self.progress_bar.isVisible(): self.progress_bar.setVisible(True)
+        if not self.progress_bar.isVisible(): 
+            self.progress_bar.setVisible(True)
+            self.progress_bar.setFixedHeight(24)       # taller
+            self.progress_bar.setMinimumWidth(300)     # wider
+            font = self.progress_bar.font()            # optional font bump
+            font.setPointSize(font.pointSize() + 2)
+            self.progress_bar.setFont(font)
+            self.progress_bar.setVisible(True)
 
         if total > 0:
              percentage = int((value / total) * 100)
@@ -887,6 +935,7 @@ class DataTab(QWidget):
                     f"Index {mode.capitalize()} Complete",
                     f"Index {mode} operation finished successfully."
                 )
+                QTimer.singleShot(0, self.handlers.run_summary_update)
 
                 # 2) Update the "Website Indexed" & "PDFs Indexed" columns
                 if url_for_status:
@@ -914,8 +963,8 @@ class DataTab(QWidget):
 
                 # 5) Update the main window statusbar LLM and Index Count (Live fetch from Qdrant)
                 try:
-                    if hasattr(self.main_window_ref, "index_manager") and self.main_window_ref.index_manager:
-                        live_vector_count = self.main_window_ref.index_manager.count()
+                    if hasattr(self.main_window, "index_manager") and self.main_window.index_manager:
+                        live_vector_count = self.main_window.index_manager.count()
                         self.indexStatusUpdate.emit(f"Ready ({live_vector_count:,} vectors)")
                     else:
                         self.indexStatusUpdate.emit("Ready")
@@ -923,8 +972,8 @@ class DataTab(QWidget):
                     logger.error(f"Error fetching live vector count: {e}")
                     self.indexStatusUpdate.emit("Ready")
 
-                if hasattr(self.main_window_ref, "update_llm_status"):
-                    self.main_window_ref.update_llm_status("Ready")
+                if hasattr(self.main_window, "update_llm_status"):
+                    self.main_window.update_llm_status("Ready")
 
 
             worker.finished.connect(on_index_finished)
@@ -1048,12 +1097,18 @@ class DataTab(QWidget):
 
                 logger.debug(f"Requesting thread {attr_name} to quit event loop.")
                 thread.quit()
+                if not thread.wait(5000):
+                    logger.warning(f"Thread {thread.objectName()} did not quit; forcing terminate.")
+                    thread.terminate()
+                    if thread and thread.isRunning() and thread != QThread.currentThread():
+                        thread.wait()
                 logger.debug(f"Waiting for thread {attr_name} to finish...")
                 if not thread.wait(5000):
                     logger.error(f"Thread {attr_name} did not stop gracefully after 5s. Terminating.")
                     # amazonq-ignore-next-line
                     thread.terminate()
-                    thread.wait()
+                    if thread and thread.isRunning() and thread != QThread.currentThread():
+                        thread.wait()
                 else: logger.info(f"Thread {attr_name} stopped gracefully.")
             elif thread:
                  logger.debug(f"Thread {attr_name} exists but is not running. Scheduling for deletion.")

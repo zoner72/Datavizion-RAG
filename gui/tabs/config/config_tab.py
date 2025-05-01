@@ -7,7 +7,7 @@ from PyQt6.QtWidgets import (
     QLineEdit, QSpinBox, QCheckBox, QTextEdit, QComboBox, QLabel
 )
 from PyQt6.QtCore import QSettings, pyqtSignal, Qt # Import Qt
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 from config_models import MainConfig, save_config_to_path, ValidationError
 
 # Import specific functions used from other config tab files
@@ -23,18 +23,15 @@ from gui.tabs.config.config_tab_groups import ( # Import group builders
 
 logger = logging.getLogger(__name__)
 
-# File: gui/tabs/config/config_tab.py
-
-# ... (imports) ...
 
 class ConfigTab(QWidget):
     configSaveRequested = pyqtSignal(dict) # <-- This is the signal ConfigTab emits
 
-    def __init__(self, *, config: MainConfig, project_root: Path, parent=None):
+    def __init__(self, config: MainConfig, project_root: Path, parent: Optional[QWidget] = None):
         super().__init__(parent=parent)
 
         self.config = config
-        self.project_root = project_root # project_root is now stored
+        self.project_root = project_root 
         self.settings_widgets: Dict[str, QWidget] = {}
         self.rebuild_warning_label = None
         self.rebuild_sensitive_keys = {"embedding_model_index", "embedding_model_query", "chunk_size", "chunk_overlap", "relevance_threshold"}
@@ -118,9 +115,6 @@ class ConfigTab(QWidget):
         # ------------------------------------------------------------------------------------
 
         logger.debug("ConfigTab: Initialization complete")
-
-
-    # --- Methods defined within ConfigTab ---
 
     def _get_widget_value(self, key: str):
         """Retrieves the value from a widget stored in settings_widgets."""

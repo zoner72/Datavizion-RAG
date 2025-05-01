@@ -13,6 +13,7 @@ from PyQt6.QtWidgets import (
 # Import QProcess and related classes for managing the server subprocess
 from PyQt6.QtCore import QTimer, QProcess, Qt, QProcessEnvironment, pyqtSignal
 from PyQt6.QtGui import QCloseEvent # Import QCloseEvent
+from config_models import MainConfig
 
 # --- Pydantic Config Import ---
 try:
@@ -74,6 +75,7 @@ class ApiTab(QWidget):
     def __init__(self, config: MainConfig, project_root: Path, parent=None): # <<< ADD project_root parameter
         """Initializes the API Tab."""
         super().__init__(parent)
+        self.config = config
         log_prefix = "ApiTab.__init__:" # For logging clarity
         logging.debug(f"{log_prefix} Initializing...")
 
@@ -100,8 +102,6 @@ class ApiTab(QWidget):
 
         # --- Initialize Members ---
         self.main_window = parent
-        self.config = config
-        # self.app_settings = QSettings(QSETTINGS_ORG, QSETTINGS_APP) # Keep if used
 
         # Process Management
         self.server_process: Optional[QProcess] = None # QProcess object for the server
@@ -125,6 +125,21 @@ class ApiTab(QWidget):
 
         logging.debug(f"{log_prefix} Initialization complete.")
 
+    def update_display(self, config: MainConfig):
+        """
+        Called when the configuration is reloaded.
+        Update any UI elements that depend on config here.
+        """
+        self.config = config
+        # Example: if you display host/port in labels, update them:
+        try:
+            if hasattr(self, 'host_label'):
+                self.host_label.setText(f"Host: {config.api.host}")
+            if hasattr(self, 'port_label'):
+                self.port_label.setText(f"Port: {config.api.port}")
+        except Exception:
+            pass
+    
     def _disable_init_on_error(self):
         """Sets essential members to None if init fails early."""
         self.main_window = None

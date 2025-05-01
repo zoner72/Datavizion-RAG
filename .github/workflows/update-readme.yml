@@ -13,7 +13,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v3
         with:
-          persist-credentials: true    # so we can push back
+          persist-credentials: true
 
       - name: Set up Python
         uses: actions/setup-python@v4
@@ -23,17 +23,11 @@ jobs:
       - name: Read version from version.py
         id: get_version
         run: |
-          # import version.py and echo into GITHUB_ENV
-          VER=$(python - <<'EOF'
-import version
-print(version.__version__)
-EOF
-)
-          echo "VERSION=$VER" >> $GITHUB_ENV
+          VERSION=$(python -c "import version; print(version.__version__)")
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
 
       - name: Update README placeholder
         run: |
-          # in-place replace your placeholder with ```<version>```
           sed -i "s|<!-- VERSION_PLACEHOLDER -->|```$VERSION```|" README.md
 
       - name: Commit & push changes
@@ -41,10 +35,9 @@ EOF
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add README.md
-          # only commit if something changed
           if ! git diff --cached --quiet; then
             git commit -m "chore: bump README version to $VERSION"
             git push
           else
-            echo "README already up-to-date, no commit necessary."
+            echo "No changes to commit"
           fi

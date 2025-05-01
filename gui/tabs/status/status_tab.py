@@ -104,6 +104,18 @@ class StatusTab(QWidget):
 
         logging.debug(f"{log_prefix} Initialization complete.")
 
+    def update_display(self, config: MainConfig):
+        """
+        Called when the configuration is reloaded.
+        Update any UI elements here that depend on config.
+        """
+        self.config = config
+        # Example: if you show the metadata extraction level:
+        try:
+            self.overview_label.setText(f"Metadata level: {config.metadata_extraction_level}")
+        except Exception:
+            pass
+    
     def _disable_init_on_error(self):
         """Sets essential members to None if init fails early."""
         self.config = None

@@ -52,6 +52,35 @@ except Exception as e:
 logging.info(f"LLM Interface using device: {DEVICE}")
 # --- End Initialization ---
 
+def _parse_sse_stream(response, partial_callback):
+    """
+    Unified SSE parser for OpenAI-style streams.
+    Reads lines beginning with "data: ", stops at "[DONE]", 
+    JSON-loads each chunk, invokes callback, and accumulates text.
+    """
+    complete = ""
+    for line in response.iter_lines():
+        if not line:
+            continue
+        decoded = line.decode("utf-8")
+        if not decoded.startswith("data: "):
+            continue
+        payload = decoded[len("data: "):].strip()
+        if payload == "[DONE]":
+            break
+        try:
+            data = json.loads(payload)
+            delta = data.get("choices", [{}])[0].get("delta", {})
+            chunk = delta.get("content")
+            if chunk:
+                complete += chunk
+                if partial_callback:
+                    partial_callback(chunk)
+        except Exception:
+            # skip malformed JSON or unexpected format
+            continue
+    return complete
+
 
 # --- format_prompt (Accepts MainConfig, No changes needed) ---
 def format_prompt(system_prompt: str, query: str, retrieved_docs: list[tuple], config: MainConfig) -> str:
@@ -88,7 +117,17 @@ def format_prompt(system_prompt: str, query: str, retrieved_docs: list[tuple], c
     try:
         if tokenizer:
             size_unit = "tokens"
-            header_footer_size = len(tokenizer.encode(prompt_header + prompt_footer))
+            try:
+                with torch.no_grad():
+                    tokens = tokenizer.encode(prompt_header + prompt_footer)
+            except RuntimeError as e:
+                if "out of memory" in str(e).lower():
+                    torch.cuda.empty_cache()
+                    with torch.no_grad():
+                        tokens = tokenizer.encode(prompt_header + prompt_footer, device="cpu")
+                else:
+                    raise
+            header_footer_size = len(tokens)            
         else:
             header_footer_size = len((prompt_header + prompt_footer).split())
     except Exception as e:
@@ -130,7 +169,17 @@ def format_prompt(system_prompt: str, query: str, retrieved_docs: list[tuple], c
 
         try:
             if tokenizer:
-                chunk_size = len(tokenizer.encode(full_chunk_text_for_size))
+                try:
+                    with torch.no_grad():
+                        full_chunk_tokens = tokenizer.encode(full_chunk_text_for_size)
+                except RuntimeError as e:
+                    if "out of memory" in str(e).lower():
+                        torch.cuda.empty_cache()
+                        with torch.no_grad():
+                            full_chunk_tokens = tokenizer.encode(full_chunk_text_for_size, device="cpu")
+                    else:
+                        raise
+                chunk_size = len(full_chunk_tokens)
             else:
                 chunk_size = len(full_chunk_text_for_size.split())
         except Exception as e:
@@ -401,11 +450,6 @@ def generate_answer(
         return f"Error: Invalid LLM provider configured: '{llm_provider}'."
 
 
-# --- Provider-Specific Functions ---
-
-# _generate_answer_lm_studio (Uses requests, No library needed)
-# Keep the corrected version from previous steps that accepts config object
-# and uses requests to call the API, handling streaming.
 def _generate_answer_lm_studio(
     config: MainConfig,
     context: str,
@@ -469,28 +513,8 @@ def _generate_answer_lm_studio(
         response.raise_for_status()
 
         if payload["stream"]:
-            logging.debug("Streaming response from LM Studio...")
-            # --- Standard SSE Processing Logic ---
-            for line in response.iter_lines():
-                if line:
-                    decoded_line = line.decode('utf-8')
-                    if decoded_line.startswith('data: '):
-                        json_str = decoded_line[len('data: '):].strip()
-                        if json_str == '[DONE]': break
-                        try:
-                            chunk_data = json.loads(json_str)
-                            delta = chunk_data.get("choices", [{}])[0].get("delta", {})
-                            content_chunk = delta.get("content")
-                            if content_chunk:
-                                complete_response += content_chunk
-                                if partial_callback:
-                                    try: partial_callback(content_chunk)
-                                    except Exception as cb_err: logging.error(f"Error in partial_callback (LM Studio): {cb_err}", exc_info=True)
-                        except json.JSONDecodeError: logging.warning(f"LM Studio stream: Invalid JSON skipped: {json_str}")
-                        except Exception as e: logging.error(f"Error processing LM Studio chunk: {e} - JSON: {json_str}", exc_info=True)
-            # --- End SSE Processing ---
-            logging.info("Finished streaming from LM Studio.")
-        else: # Non-streaming
+            complete_response = _parse_sse_stream(response, partial_callback)
+        else:
             json_response = response.json()
             message = json_response.get('choices', [{}])[0].get('message', {})
             complete_response = message.get('content', "")
@@ -605,10 +629,6 @@ def _generate_answer_openai(
         return f"Error: Unexpected error processing OpenAI request: {e}"
 
 
-# _generate_answer_gpt4all (Uses requests, No library needed)
-# Keep the corrected version from previous steps that accepts config object
-# and uses requests to call the API, handling streaming.
-# Ensure config_models.py has 'gpt4all_api_url' field in MainConfig
 def _generate_answer_gpt4all(
     config: MainConfig,
     context: str,
@@ -672,27 +692,7 @@ def _generate_answer_gpt4all(
         response.raise_for_status()
 
         if payload["stream"]:
-            logging.debug("Streaming response from GPT4All API...")
-            # --- Standard SSE Processing Logic ---
-            for line in response.iter_lines():
-                 if line:
-                     decoded_line = line.decode('utf-8')
-                     if decoded_line.startswith('data: '):
-                         json_str = decoded_line[len('data: '):].strip()
-                         if json_str == '[DONE]': break
-                         try:
-                             chunk_data = json.loads(json_str)
-                             delta = chunk_data.get("choices", [{}])[0].get("delta", {})
-                             content_chunk = delta.get("content")
-                             if content_chunk:
-                                 complete_response += content_chunk
-                                 if partial_callback:
-                                     try: partial_callback(content_chunk)
-                                     except Exception as cb_err: logging.error(f"Error in partial_callback (GPT4All API): {cb_err}", exc_info=True)
-                         except json.JSONDecodeError: logging.warning(f"GPT4All API stream: Invalid JSON skipped: {json_str}")
-                         except Exception as e: logging.error(f"Error processing GPT4All API chunk: {e} - JSON: {json_str}", exc_info=True)
-            # --- End SSE Processing ---
-            logging.info("Finished streaming from GPT4All API.")
+            complete_response = _parse_sse_stream(response, partial_callback)
         else: # Non-streaming
             json_response = response.json()
             message = json_response.get('choices', [{}])[0].get('message', {})
@@ -752,16 +752,11 @@ def _generate_answer_ollama(
         "stream": bool(partial_callback),
         "options": { # Ollama uses an 'options' dictionary
             "temperature": temperature,
-            # "num_predict": max_tokens # Example: Control max generation length
-            # "num_ctx": 4096 # Example: Control context window size
+
         }
-        # Add system prompt if supported by specific model/Ollama version
-        # "system": config.prompt_description or "You are a helpful assistant."
     }
 
-    # Add conversation history if supported/needed
-    # The format might differ, check Ollama documentation
-    # if conversation_history: payload["messages"] = conversation_history # Example
+
 
     logging.info(f"Sending request to Ollama API: {api_url} | Model: {model_name} | Streaming: {payload['stream']}")
     # logging.debug(f"Ollama Payload: {json.dumps(payload, indent=2)}")
@@ -775,26 +770,7 @@ def _generate_answer_ollama(
         response.raise_for_status()
 
         if payload["stream"]:
-            logging.debug("Streaming Ollama response...")
-            # Ollama streaming returns JSON objects line by line
-            for line in response.iter_lines(decode_unicode=True):
-                 if line:
-                     try:
-                         data = json.loads(line)
-                         chunk = data.get("response", "") # Key is 'response' for content
-                         complete_response += chunk
-                         if partial_callback:
-                             try: partial_callback(chunk)
-                             except Exception as cb_err: logging.error(f"Error in partial_callback (Ollama): {cb_err}", exc_info=True)
-                         # Check Ollama's stream termination flag
-                         if data.get("done"):
-                             logging.debug("Ollama stream 'done' flag received.")
-                             break
-                     except json.JSONDecodeError:
-                         logging.warning(f"Ollama stream: Invalid JSON line skipped: {line}")
-                     except Exception as e:
-                          logging.error(f"Error processing Ollama chunk: {e} - Line: {line}", exc_info=True)
-            logging.info("Finished streaming response from Ollama.")
+            complete_response = _parse_sse_stream(response, partial_callback)
         else: # Non-streaming
              json_response = response.json()
              complete_response = json_response.get("response", "") # Key is 'response'
@@ -872,29 +848,8 @@ def _generate_answer_jan(
             timeout=180 # Consider config
         )
         response.raise_for_status()
-
         if payload["stream"]:
-            logging.debug("Streaming response from Jan API...")
-            # --- Standard SSE Processing Logic (same as LM Studio) ---
-            for line in response.iter_lines():
-                if line:
-                    decoded_line = line.decode('utf-8')
-                    if decoded_line.startswith('data: '):
-                        json_str = decoded_line[len('data: '):].strip()
-                        if json_str == '[DONE]': break
-                        try:
-                            chunk_data = json.loads(json_str)
-                            delta = chunk_data.get("choices", [{}])[0].get("delta", {})
-                            content_chunk = delta.get("content")
-                            if content_chunk:
-                                complete_response += content_chunk
-                                if partial_callback:
-                                    try: partial_callback(content_chunk)
-                                    except Exception as cb_err: logging.error(f"Error in partial_callback (Jan): {cb_err}", exc_info=True)
-                        except json.JSONDecodeError: logging.warning(f"Jan API stream: Invalid JSON skipped: {json_str}")
-                        except Exception as e: logging.error(f"Error processing Jan API chunk: {e} - JSON: {json_str}", exc_info=True)
-            # --- End SSE Processing ---
-            logging.info("Finished streaming from Jan API.")
+            complete_response = _parse_sse_stream(response, partial_callback)
         else: # Non-streaming
             json_response = response.json()
             message = json_response.get('choices', [{}])[0].get('message', {})

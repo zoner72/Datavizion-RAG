@@ -10,6 +10,7 @@ import contextlib
 from fastapi import FastAPI, HTTPException, Body, Depends
 from pydantic import BaseModel, Field 
 from typing import Optional, AsyncGenerator, Dict, Any 
+from config_models import MainConfig
 
 
 try:
@@ -42,7 +43,7 @@ except ImportError as e:
 
 try:
     from scripts.indexing.qdrant_index_manager import QdrantIndexManager
-    from scripts.indexing.embedding_utils import CustomSentenceTransformer
+    from scripts.indexing.embedding_utils import PrefixAwareTransformer as CustomSentenceTransformer
     from scripts.retrieval.retrieval_core import MemoryContextManager
     from scripts.llm.llm_interface import generate_answer, load_provider_modules
     core_components_available = True
@@ -144,7 +145,12 @@ def initialize_server_components(config_obj: MainConfig) -> bool:
         index_model_name = config_obj.embedding_model_index
         if not index_model_name: raise ValueError("Config missing 'embedding_model_index'")
         logger.info(f"Loading index embedding model: {index_model_name}...")
-        index_embedding_model = CustomSentenceTransformer(index_model_name)
+        prefixes = config.model_prefixes.get(index_model_name, {"query": "", "document": ""})
+        index_embedding_model = CustomSentenceTransformer(
+            model_name_or_path=index_model_name,
+            prefixes=prefixes,
+            trust_remote_code=config.embedding_trust_remote_code
+        )
         _initialized_components["index_embedding_model"] = index_embedding_model
         logger.info("Index embedding model loaded.")
 
@@ -158,7 +164,13 @@ def initialize_server_components(config_obj: MainConfig) -> bool:
         logger.info("Qdrant Index Manager initialized.")
 
         # 3. Query Embedding Model (Uses config)
-        query_model_name = config_obj.embedding_model_query # Should have default set by validator now
+        query_model_name = config.embedding_model_query or index_model_name
+        query_prefixes = config.model_prefixes.get(query_model_name, {"query": "", "document": ""})
+        query_embedding_model = CustomSentenceTransformer(
+            model_name_or_path=query_model_name,
+            prefixes=query_prefixes,
+            trust_remote_code=config.embedding_trust_remote_code
+        )
         if not query_model_name: raise ValueError("Config missing 'embedding_model_query'")
 
         if index_model_name == query_model_name:

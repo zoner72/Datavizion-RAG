@@ -6,6 +6,7 @@ import sys
 import os
 import subprocess
 import time
+from typing import Optional
 from urllib.parse import urlparse
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QMessageBox, QTableWidgetItem, QFileDialog, QApplication)
 from PyQt6.QtCore import pyqtSignal, QTimer, QThread, QObject, Qt, QMetaObject, Q_ARG, pyqtSlot
@@ -50,7 +51,8 @@ class BaseWorker(QObject):
         if not thread.wait(5000):
             logger.warning(f"Thread {thread.objectName()} did not quit; forcing terminate.")
             thread.terminate()
-            thread.wait()
+            if thread and thread.isRunning() and thread != QThread.currentThread():
+                thread.wait()
 
     def run(self):
         raise NotImplementedError("Subclasses must implement run()")
@@ -88,7 +90,8 @@ class IndexWorker(BaseWorker):
         if not thread.wait(5000):
             logger.warning(f"Thread {thread.objectName()} did not quit; forcing terminate.")
             thread.terminate()
-            thread.wait()
+            if thread and thread.isRunning() and thread != QThread.currentThread():
+                thread.wait()
 
     def run(self):
         """
@@ -147,7 +150,8 @@ class IndexWorker(BaseWorker):
                 if not thread.wait(5000):
                     logger.warning(f"Thread {thread.objectName()} did not quit; forcing terminate.")
                     thread.terminate()
-                    thread.wait()
+                    if thread and thread.isRunning() and thread != QThread.currentThread():
+                        thread.wait()
 
 
 class ScrapeWorker(BaseWorker):
@@ -184,7 +188,8 @@ class ScrapeWorker(BaseWorker):
             if not thread.wait(5000):
                 logger.warning(f"Thread {thread.objectName()} did not quit; forcing terminate.")
                 thread.terminate()
-                thread.wait()
+                if thread and thread.isRunning() and thread != QThread.currentThread():
+                    thread.wait()
 
     def run(self):
         thread = self.thread()
@@ -259,7 +264,8 @@ class ScrapeWorker(BaseWorker):
                 if not thread.wait(5000):
                     logger.warning(f"Thread {thread.objectName()} did not quit; forcing terminate.")
                     thread.terminate()
-                    thread.wait()
+                    if thread and thread.isRunning() and thread != QThread.currentThread():
+                        thread.wait()
 
 
 class PDFDownloadWorker(BaseWorker):
@@ -281,7 +287,8 @@ class PDFDownloadWorker(BaseWorker):
             if not thread.wait(5000):
                 logger.warning(f"Thread {thread.objectName()} did not quit; forcing terminate.")
                 thread.terminate()
-                thread.wait()
+                if thread and thread.isRunning() and thread != QThread.currentThread():
+                    thread.wait()
 
     def run(self):
         thread = self.thread()
@@ -350,7 +357,8 @@ class PDFDownloadWorker(BaseWorker):
                 if not thread.wait(5000):
                     logger.warning(f"Thread {thread.objectName()} did not quit; forcing terminate.")
                     thread.terminate()
-                    thread.wait()
+                    if thread and thread.isRunning() and thread != QThread.currentThread():
+                        thread.wait()
 
 class LocalFileScanWorker(BaseWorker):
     finished = pyqtSignal(int)
@@ -445,7 +453,12 @@ class DataTab(QWidget):
     indexStatusUpdate = pyqtSignal(str)
     qdrantConnectionStatus = pyqtSignal(str)
 
-    def __init__(self, config: MainConfig, parent=None, project_root: Path | None = None):
+    def __init__(
+        self,
+        config: MainConfig,
+        project_root: Path,
+        parent: Optional[QWidget] = None
+    ):
         super().__init__(parent)
         logger.debug("Initializing DataTab UI...")
 
@@ -710,7 +723,14 @@ class DataTab(QWidget):
                                      Q_ARG(int, value), Q_ARG(int, total))
             return
 
-        if not self.progress_bar.isVisible(): self.progress_bar.setVisible(True)
+        if not self.progress_bar.isVisible(): 
+            self.progress_bar.setVisible(True)
+            self.progress_bar.setFixedHeight(24)       # taller
+            self.progress_bar.setMinimumWidth(300)     # wider
+            font = self.progress_bar.font()            # optional font bump
+            font.setPointSize(font.pointSize() + 2)
+            self.progress_bar.setFont(font)
+            self.progress_bar.setVisible(True)
 
         if total > 0:
              percentage = int((value / total) * 100)
@@ -915,6 +935,7 @@ class DataTab(QWidget):
                     f"Index {mode.capitalize()} Complete",
                     f"Index {mode} operation finished successfully."
                 )
+                QTimer.singleShot(0, self.handlers.run_summary_update)
 
                 # 2) Update the "Website Indexed" & "PDFs Indexed" columns
                 if url_for_status:
@@ -1079,13 +1100,15 @@ class DataTab(QWidget):
                 if not thread.wait(5000):
                     logger.warning(f"Thread {thread.objectName()} did not quit; forcing terminate.")
                     thread.terminate()
-                    thread.wait()
+                    if thread and thread.isRunning() and thread != QThread.currentThread():
+                        thread.wait()
                 logger.debug(f"Waiting for thread {attr_name} to finish...")
                 if not thread.wait(5000):
                     logger.error(f"Thread {attr_name} did not stop gracefully after 5s. Terminating.")
                     # amazonq-ignore-next-line
                     thread.terminate()
-                    thread.wait()
+                    if thread and thread.isRunning() and thread != QThread.currentThread():
+                        thread.wait()
                 else: logger.info(f"Thread {attr_name} stopped gracefully.")
             elif thread:
                  logger.debug(f"Thread {attr_name} exists but is not running. Scheduling for deletion.")

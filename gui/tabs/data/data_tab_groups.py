@@ -5,7 +5,8 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QPushButton,
-    QProgressBar
+    QProgressBar,
+    QSizePolicy
 )
 from .data_tab_widgets import (
     create_url_input_row,
@@ -229,7 +230,18 @@ def build_status_bar_group(tab):
         tab.progress_bar.setVisible(False)
         tab.progress_bar.setRange(0, 100)
         tab.progress_bar.setTextVisible(True)
-        tab.progress_bar.setMinimumWidth(200)
+        tab.progress_bar.setMinimumWidth(300)
+        tab.progress_bar.setFixedHeight(20)
+        tab.progress_bar.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Fixed
+        )
+
+        # Also prevent the whole group from collapsing vertically
+        group.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Fixed
+        )
 
         layout.addWidget(tab.status_label, 1)
         layout.addWidget(tab.progress_bar, 0)

@@ -1,6 +1,6 @@
 # Datavizion
 
-## Version
+## Version 0.1.10
 <!-- VERSION_PLACEHOLDER -->
 
 =========

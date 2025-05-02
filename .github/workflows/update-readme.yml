@@ -1,43 +1,8 @@
-name: Update README with version
-
-on:
-  push:
-    branches:
-      - main
-
-jobs:
-  update-readme:
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v3
-        with:
-          persist-credentials: true
-
-      - name: Set up Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.x'
-
-      - name: Read version from version.py
-        id: get_version
-        run: |
-          VERSION=$(python -c "import version; print(version.__version__)")
-          echo "VERSION=$VERSION" >> $GITHUB_ENV
-
-      - name: Update README placeholder
-        run: |
-          sed -i "s|<!-- VERSION_PLACEHOLDER -->|```$VERSION```|" README.md
-
-      - name: Commit & push changes
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add README.md
-          if ! git diff --cached --quiet; then
-            git commit -m "chore: bump README version to $VERSION"
-            git push
-          else
-            echo "No changes to commit"
-          fi
+- name: Push updated README
+  run: |
+    git config user.name "github-actions[bot]"
+    git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+    git remote set-url origin https://x-access-token:${{ secrets.GH_PAT }}@github.com/zoner72/Datavizion-RAG.git
+    git add README.md
+    git commit -m "chore: bump README version to $VERSION" || echo "No changes to commit"
+    git push origin main

@@ -1,55 +1,56 @@
-/.ruff_cache
-/.venv
-/.vscode
-/app_logs
-/cache
-/data
-gui/tabs/status/__pycache__/__init__.cpython-311.pyc
+# Ruff cache
+.ruff_cache/
+
+# Python virtual-envs
+.venv/
+venv/
+env/
+
+# VS Code and other editor configs
+.vscode/
+.idea/
+*.swp
+
+# Byte-compiled / cache files
 __pycache__/
 *.py[cod]
-*.pyo
 *.pyc
+*.pyo
 *.pyd
 
 # C extensions
 *.so
 *.cpython-*
 
-# Virtual environments
-venv/
-env/
-.venv/
-
-# Jupyter Notebook checkpoints
+# Jupyter
 .ipynb_checkpoints/
 
-# IDEs and editors
-.vscode/
-.idea/
-*.swp
-
-# Logs and temp files
+# Logs, temp, backups
 *.log
 *.tmp
 *.bak
+app_logs/
+cache/
 
-# OS files
-.DS_Store
-Thumbs.db
+# Data directories (if you never commit raw data)
+data/
 
-# Tests and coverage
-.coverage
-htmlcov/
-.tox/
-.pytest_cache/
-
-# Build
+# Build artifacts
 build/
 dist/
 *.egg-info/
 .eggs/
 
+# Testing / coverage
+.coverage
+htmlcov/
+.tox/
+.pytest_cache/
+
 # MyPy
 .mypy_cache/
 .dmypy.json
-gui/tabs/chat/__pycache__/chat_tab.cpython-311.pyc
+
+# OS-specific
+.DS_Store
+Thumbs.db

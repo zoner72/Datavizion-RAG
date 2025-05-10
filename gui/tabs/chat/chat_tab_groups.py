@@ -8,8 +8,9 @@ from gui.tabs.chat.chat_tab_widgets import (
     create_conversation_display,
     create_correction_input,
     create_submit_correction_button,
-    create_new_chat_button
+    create_new_chat_button,
 )
+
 
 def build_chat_group(tab):
     group = QGroupBox("Chat Interface")

@@ -6,19 +6,19 @@ from PyQt6.QtWidgets import (
     QLabel,
     QPushButton,
     QProgressBar,
-    QSizePolicy
+    QSizePolicy,
 )
 from .data_tab_widgets import (
     create_url_input_row,
     create_button_row,
-    create_scraped_websites_table
+    create_scraped_websites_table,
 )
 from .data_tab_constants import (
     DATA_WEBSITE_GROUP_TITLE,
     DATA_INDEX_HEALTH_GROUP_TITLE,
     DATA_IMPORTED_WEBSITES_LABEL,
     DATA_ADD_DOC_BUTTON,
-    DATA_ADD_SOURCES_GROUP_TITLE
+    DATA_ADD_SOURCES_GROUP_TITLE,
 )
 
 
@@ -31,6 +31,7 @@ class DropGroupBox(QGroupBox):
     its owner’s DataTabHandlers.handle_dropped_files(...)
     Includes light styling and hover feedback.
     """
+
     def __init__(self, title: str, owner):
         super().__init__(title)
         self.owner = owner
@@ -98,7 +99,6 @@ class DropGroupBox(QGroupBox):
         event.acceptProposedAction()
 
 
-
 def build_website_group(tab):
     """Builds the GroupBox for website data acquisition."""
     try:
@@ -110,15 +110,23 @@ def build_website_group(tab):
         url_row, tab.url_input = create_url_input_row()
 
         # Buttons
-        tab.scrape_website_button   = QPushButton("Scrape Website & Find PDFs")
-        tab.cancel_pipeline_button  = QPushButton("Cancel Current Operation")
-        tab.import_log_button       = QPushButton("Download PDFs from Log")
-        tab.delete_config_button    = QPushButton("Delete Entry")
+        tab.scrape_website_button = QPushButton("Scrape Website & Find PDFs")
+        tab.cancel_pipeline_button = QPushButton("Cancel Current Operation")
+        tab.import_log_button = QPushButton("Download PDFs from Log")
+        tab.delete_config_button = QPushButton("Delete Entry")
 
-        tab.scrape_website_button  .setToolTip("Scrape text and discover PDF links at the URL entered above.")
-        tab.cancel_pipeline_button .setToolTip("Stop the ongoing scrape/download/index operation.")
-        tab.import_log_button      .setToolTip("Download all PDFs listed in the selected site's log file.")
-        tab.delete_config_button   .setToolTip("Remove the selected website from the list (does not delete files).")
+        tab.scrape_website_button.setToolTip(
+            "Scrape text and discover PDF links at the URL entered above."
+        )
+        tab.cancel_pipeline_button.setToolTip(
+            "Stop the ongoing scrape/download/index operation."
+        )
+        tab.import_log_button.setToolTip(
+            "Download all PDFs listed in the selected site's log file."
+        )
+        tab.delete_config_button.setToolTip(
+            "Remove the selected website from the list (does not delete files)."
+        )
 
         tab.cancel_pipeline_button.setEnabled(False)
 
@@ -127,7 +135,7 @@ def build_website_group(tab):
             tab.scrape_website_button,
             tab.cancel_pipeline_button,
             tab.import_log_button,
-            tab.delete_config_button
+            tab.delete_config_button,
         )
 
         # Table of tracked sites
@@ -151,15 +159,19 @@ def build_health_group(tab):
         layout = QVBoxLayout(group)
         layout.setSpacing(5)
 
-        tab.health_status_label      = QLabel("Status: Initializing...")
-        tab.health_vectors_label     = QLabel("Vectors in Index: -")
+        tab.health_status_label = QLabel("Status: Initializing...")
+        tab.health_vectors_label = QLabel("Vectors in Index: -")
         tab.health_local_files_label = QLabel("Local Files Scanned: -")
-        tab.health_last_op_label     = QLabel("Last Operation: N/A")
+        tab.health_last_op_label = QLabel("Last Operation: N/A")
 
         tab.refresh_index_button = QPushButton("Refresh Index")
         tab.rebuild_index_button = QPushButton("Rebuild Index")
-        tab.refresh_index_button.setToolTip("Scan data directory for new/changed files and index them.")
-        tab.rebuild_index_button.setToolTip("Wipe the existing index and re-index *everything* in data directory.")
+        tab.refresh_index_button.setToolTip(
+            "Scan data directory for new/changed files and index them."
+        )
+        tab.rebuild_index_button.setToolTip(
+            "Wipe the existing index and re-index *everything* in data directory."
+        )
 
         layout.addWidget(tab.health_status_label)
         layout.addWidget(tab.health_vectors_label)
@@ -208,11 +220,9 @@ def build_add_source_group(tab):
 
         return group
 
-
     except Exception as e:
         logger.error(f"Error building add source group: {e}", exc_info=True)
         return QGroupBox("Error Building Add Documents Group")
-
 
 
 def build_status_bar_group(tab):
@@ -233,15 +243,11 @@ def build_status_bar_group(tab):
         tab.progress_bar.setMinimumWidth(300)
         tab.progress_bar.setFixedHeight(20)
         tab.progress_bar.setSizePolicy(
-            QSizePolicy.Policy.Expanding,
-            QSizePolicy.Policy.Fixed
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
         )
 
         # Also prevent the whole group from collapsing vertically
-        group.setSizePolicy(
-            QSizePolicy.Policy.Expanding,
-            QSizePolicy.Policy.Fixed
-        )
+        group.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
         layout.addWidget(tab.status_label, 1)
         layout.addWidget(tab.progress_bar, 0)

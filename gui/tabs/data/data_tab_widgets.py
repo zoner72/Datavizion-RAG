@@ -1,8 +1,14 @@
 # File: gui/tabs/data/data_tab_widgets.py
 
 from PyQt6.QtWidgets import (
-    QTableWidget, QLabel, QPushButton, QLineEdit, QHBoxLayout,
-    QVBoxLayout, QGroupBox, QHeaderView
+    QTableWidget,
+    QLabel,
+    QPushButton,
+    QLineEdit,
+    QHBoxLayout,
+    QVBoxLayout,
+    QGroupBox,
+    QHeaderView,
 )
 import logging
 
@@ -16,6 +22,7 @@ from gui.tabs.data.data_tab_constants import (
 
 logger = logging.getLogger(__name__)
 
+
 def create_scraped_websites_table() -> QTableWidget:
     """Creates and configures the table for displaying tracked websites."""
     try:
@@ -26,17 +33,22 @@ def create_scraped_websites_table() -> QTableWidget:
         table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
         table.verticalHeader().setVisible(False)
-        table.horizontalHeader().setStretchLastSection(False) # Don't stretch last section
+        table.horizontalHeader().setStretchLastSection(
+            False
+        )  # Don't stretch last section
         # Stretch the URL column (index 0)
         table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         # Resize other columns to content
         for i in range(1, len(DATA_WEBSITE_TABLE_HEADERS)):
-            table.horizontalHeader().setSectionResizeMode(i, QHeaderView.ResizeMode.ResizeToContents)
-        table.setSortingEnabled(True) # Allow sorting
+            table.horizontalHeader().setSectionResizeMode(
+                i, QHeaderView.ResizeMode.ResizeToContents
+            )
+        table.setSortingEnabled(True)  # Allow sorting
         return table
     except Exception as e:
         logger.error(f"Error creating scraped websites table: {e}", exc_info=True)
-        return QTableWidget() # Return empty table on error
+        return QTableWidget()  # Return empty table on error
+
 
 def create_url_input_row() -> tuple[QHBoxLayout, QLineEdit]:
     """Creates the URL input label and line edit row."""
@@ -52,10 +64,10 @@ def create_url_input_row() -> tuple[QHBoxLayout, QLineEdit]:
 def create_button_row(*buttons: QPushButton) -> QHBoxLayout:
     """Creates a horizontal layout row for buttons."""
     layout = QHBoxLayout()
-    layout.setSpacing(10) # Add some spacing between buttons
+    layout.setSpacing(10)  # Add some spacing between buttons
     for button in buttons:
         layout.addWidget(button)
-    layout.addStretch(1) # Push buttons to the left
+    layout.addStretch(1)  # Push buttons to the left
     return layout
 
 
@@ -64,8 +76,14 @@ def create_health_label_row(label_text: str, default_value: str) -> QLabel:
     return label
 
 
-def create_health_group(status: QLabel, vectors: QLabel, local: QLabel, last_op: QLabel,
-                         refresh_btn: QPushButton, rebuild_btn: QPushButton) -> QGroupBox:
+def create_health_group(
+    status: QLabel,
+    vectors: QLabel,
+    local: QLabel,
+    last_op: QLabel,
+    refresh_btn: QPushButton,
+    rebuild_btn: QPushButton,
+) -> QGroupBox:
     group = QGroupBox(DATA_INDEX_HEALTH_GROUP_TITLE)
     layout = QVBoxLayout(group)
     layout.addWidget(status)
@@ -77,7 +95,9 @@ def create_health_group(status: QLabel, vectors: QLabel, local: QLabel, last_op:
     return group
 
 
-def create_add_source_group(add_doc_btn: QPushButton, import_log_btn: QPushButton) -> QGroupBox:
+def create_add_source_group(
+    add_doc_btn: QPushButton, import_log_btn: QPushButton
+) -> QGroupBox:
     group = QGroupBox(DATA_ADD_SOURCES_GROUP_TITLE)
     layout = QHBoxLayout(group)
     layout.addWidget(add_doc_btn)

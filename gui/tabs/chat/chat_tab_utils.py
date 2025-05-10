@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import logging
 
+
 def save_correction_for_training(query: str, corrected_answer: str):
     try:
         app_data_dir = Path("app_data")

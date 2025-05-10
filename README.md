@@ -1,13 +1,12 @@
-# Datavizion
-
-## Version 0.1.10
+Datavizion
+Version 0.2.0
 <!-- VERSION_PLACEHOLDER -->
 
 =========
 
 Overview
 --------
-Datavizion is a beginner-friendly desktop RAG implementation that lets you scrape, index, query, and manage documents with a few clicks. Powered by PyQt6, Qdrant, and your choice of LLM backends, it delivers a smooth, drag-and-drop workflow for turning websites and PDFs into an intelligent knowledge base.
+Datavizion is a beginner‑friendly desktop RAG tool that lets you scrape, index, query, and manage documents with just a few clicks. Built on PyQt6, Qdrant, and your choice of LLM backends, it provides a seamless drag‑and‑drop workflow for turning websites and PDFs into an intelligent, updatable knowledge base.
 
 Key Features
 ------------

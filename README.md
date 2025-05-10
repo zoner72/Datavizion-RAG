@@ -1,6 +1,6 @@
 # Datavizion
 
-## Version
+## Version 0.1.10
 <!-- VERSION_PLACEHOLDER -->
 
 =========
@@ -42,6 +42,7 @@ Create a virtual environment & install Python deps
 
 python3 -m venv .venv
 source .venv/bin/activate    # or `.venv\Scripts\activate` on Windows
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
 pip install -r requirements.txt
 Start Qdrant with Docker Compose
 

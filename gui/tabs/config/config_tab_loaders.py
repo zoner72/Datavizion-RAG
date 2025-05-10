@@ -1,174 +1,223 @@
-# File: gui/tabs/config/config_tab_loaders.py
-
 import logging
-from PyQt6.QtWidgets import QLineEdit, QSpinBox, QDoubleSpinBox, QCheckBox, QTextEdit, QComboBox
-from PyQt6.QtCore import Qt, QSettings # Import QSettings
-from pathlib import Path # Import Path for isinstance checks
+
+from PyQt6.QtCore import QSettings, Qt
+from PyQt6.QtWidgets import (
+    QCheckBox,
+    QComboBox,
+    QDoubleSpinBox,
+    QLineEdit,
+    QSlider,
+    QSpinBox,
+    QTextEdit,
+)
 
 logger = logging.getLogger(__name__)
 
-# Ensure the placeholder constant is accessible
 try:
     from gui.tabs.config.config_tab_constants import CONFIG_API_KEY_PLACEHOLDER
 except ImportError:
-    CONFIG_API_KEY_PLACEHOLDER = "•••••••• (loaded from secure storage if previously saved)"
-    logger.warning("Could not import CONFIG_API_KEY_PLACEHOLDER from constants.")
+    CONFIG_API_KEY_PLACEHOLDER = (
+        "•••••••• (loaded from secure storage if previously saved)"
+    )
+    logger.warning("Could not import CONFIG_API_KEY_PLACEHOLDER; using fallback.")
 
 
-# This function assumes 'self' is a ConfigTab instance
 def load_values_from_config(self):
     """Loads values from the config object and QSettings into the UI widgets."""
-    logger.debug("Loading config values into UI...")
+    logger.debug("Loading config values into UI…")
+    # — API key from QSettings —
+    api_key_widget = self.settings_widgets.get("openai_api_key_field")
+    if isinstance(api_key_widget, QLineEdit):
+        settings = getattr(self, "settings", QSettings("KnowledgeLLM", "App"))
+        stored = settings.value("credentials/openai_api_key", "", type=str)
+        api_key_widget.setText(stored)
+        api_key_widget.setPlaceholderText(
+            CONFIG_API_KEY_PLACEHOLDER if stored else "Enter your OpenAI API Key"
+        )
+        logger.debug(f"API key loaded (present={bool(stored)}).")
 
-    # --- Load API Key from QSettings separately ---
-    # Use the consistent widget key defined in _add_openai_api_key_setting
-    api_key_field_key = "openai_api_key_field"
-    api_key_field = self.settings_widgets.get(api_key_field_key)
-
-    if api_key_field and isinstance(api_key_field, QLineEdit):
-        logger.debug(f"Loading API key for widget '{api_key_field_key}' from QSettings.")
-        try:
-            # Assuming QSettings is accessible via self.settings
-            settings = self.settings if hasattr(self, 'settings') else QSettings("KnowledgeLLM", "App")
-            saved_api_key = settings.value("credentials/openai_api_key", "", type=str)
-
-            if saved_api_key:
-                api_key_field.setText(saved_api_key)
-                # Maybe set a slightly different placeholder or tooltip once loaded
-                api_key_field.setPlaceholderText(CONFIG_API_KEY_PLACEHOLDER)
-            else:
-                 api_key_field.setText("") # Clear if no saved key
-                 api_key_field.setPlaceholderText("Enter your OpenAI API Key") # Default placeholder
-
-            logger.debug(f"Successfully loaded API key (present: {bool(saved_api_key)}).")
-
-        except Exception as e:
-             logger.error(f"Failed to load OpenAI API key from QSettings for widget '{api_key_field_key}': {e}", exc_info=True)
-    else:
-        logger.debug(f"OpenAI API key widget '{api_key_field_key}' not found in settings_widgets.")
-
-
-    # --- Now iterate through settings_widgets for keys *other than* the API key ---
-    for key_path, widget in self.settings_widgets.items():
-        # Skip the API key widget as it's handled above
-        if key_path == api_key_field_key:
+    # — Everything else from self.config —
+    for key_path, widget in list(self.settings_widgets.items()):
+        # skip QSettings‑managed API key field
+        if key_path == "openai_api_key_field":
             continue
 
-        logger.debug(f"Attempting to load value for widget key: '{key_path}'")
-        current_value = None
+        # skip any intentionally removed config keys
+        root_key = key_path.split(".")[0]
+        if not hasattr(self.config, root_key):
+            continue
+
+        # drill down through nested attributes
         try:
-            obj = self.config
-            keys = key_path.split('.')
-            # Traverse nested attributes
-            for i, key in enumerate(keys):
-                if not hasattr(obj, key):
-                    # Log specific missing key path for nested values
-                    current_path_str = '.'.join(keys[:i+1])
-                    logger.warning(f"Config path part '{key}' not found in config object for full path '{key_path}'. Checked up to '{current_path_str}'. Skipping loading for this widget.")
-                    # Use a specific exception to break the inner loop and be caught below
-                    raise AttributeError(f"Attribute '{key}' not found in path '{key_path}'")
-                obj = getattr(obj, key)
-            current_value = obj
-            # Handle Pydantic models like LoggingConfig etc. if the last attribute is a model
-            # We need the actual value from the model, not the model object itself.
-            # This seems implicitly handled by getattr if the target is a primitive type.
-            logger.debug(f"  Retrieved value: {current_value} (Type: {type(current_value).__name__})")
+            val = self.config
+            for part in key_path.split("."):
+                val = getattr(val, part)
+        except AttributeError:
+            # skip if any attribute in path is missing
+            continue
 
-        except AttributeError as e:
-            # Warning already logged inside the loop
-            continue # Skip setting widget value if config path doesn't exist
-
-        except Exception as e:
-            # Catch other unexpected errors during value retrieval
-            logger.error(f"Unexpected error retrieving value for '{key_path}' from config: {e}", exc_info=True)
-            continue # Skip setting widget value
-
-
+        # now set widget from val
         try:
-            logger.debug(f"  Attempting to set widget '{key_path}' value: {current_value} (Widget type: {type(widget).__name__})")
-            # --- Set widget value based on type ---
             if isinstance(widget, QLineEdit):
-                 # Convert Paths to string for QLineEdit
-                 text_value = str(current_value) if isinstance(current_value, Path) else str(current_value if current_value is not None else '')
-                 widget.setText(text_value)
+                widget.setText(str(val or ""))
             elif isinstance(widget, QSpinBox):
-                 # Use 0 as a fallback if the value is None, as SpinBox requires int
-                 widget.setValue(int(current_value) if current_value is not None else 0)
+                widget.setValue(int(val or 0))
             elif isinstance(widget, QDoubleSpinBox):
-                 # Use 0.0 as a fallback if the value is None, as DoubleSpinBox requires float
-                 widget.setValue(float(current_value) if current_value is not None else 0.0)
+                widget.setValue(float(val or 0.0))
             elif isinstance(widget, QCheckBox):
-                 widget.setChecked(bool(current_value))
+                widget.setChecked(bool(val))
             elif isinstance(widget, QTextEdit):
-                 widget.setPlainText(str(current_value if current_value is not None else ''))
+                widget.setPlainText(str(val or ""))
             elif isinstance(widget, QComboBox):
-                 # Ensure value is a string for comparison
-                 val_str = str(current_value if current_value is not None else '')
-                 # QComboBox findText is case-sensitive by default with MatchFixedString
-                 idx = widget.findText(val_str, Qt.MatchFlag.MatchFixedString)
-                 if idx >= 0:
+                val_str = str(val if val is not None else "")
+                idx = widget.findText(val_str, Qt.MatchFlag.MatchFixedString)
+                if idx >= 0:
                     widget.setCurrentIndex(idx)
-                    logger.debug(f"  Set QComboBox '{key_path}' to index {idx} for value '{val_str}'")
-                 else:
-                    # Try case-insensitive match as a fallback? Or log warning.
-                    # Let's log a warning for now.
-                    logger.warning(f"  Value '{current_value}' (string '{val_str}') not found in QComboBox items for '{key_path}'. Keeping default/current item.")
+                else:
+                    logger.warning(
+                        f"Value '{val_str}' not found in QComboBox for '{key_path}'."
+                    )
             else:
-                logger.warning(f"Unknown widget type for key '{key_path}': {type(widget).__name__}. Cannot set value.")
+                logger.debug(f"Skipping unknown widget type: {type(widget).__name__}")
+        except Exception:
+            logger.exception(f"Failed to set widget for '{key_path}'")
 
-        except Exception as e:
-            logger.error(f"Failed to set widget '{key_path}' value (Retrieved: {current_value}): {e}", exc_info=True)
-
-
-    # --- Hybrid Weight Slider Sync ---
-    # This logic loads the slider based on the keyword_weight from the config.
-    # Assume slider value (0-100) corresponds to keyword_weight (0.0-1.0)
-    logger.debug("Attempting to load hybrid weight slider value.")
-    slider = self.ui_widgets.get('hybrid_weight_slider') # Use ui_widgets key
+    # — Hybrid weight slider (0–100 ←→ 0.0–1.0) —
+    slider = self.ui_widgets.get("hybrid_weight_slider")
     if slider:
         try:
-            # Read keyword_weight from the config object
-            # Ensure it's treated as a float, defaulting to 0.5 if missing
-            kw_weight = float(getattr(self.config, "keyword_weight", 0.5))
-            # Convert keyword_weight (0.0-1.0) to slider value (0-100)
-            slider_value = int(round(kw_weight * 100)) # Round before casting to int
-            # Ensure value is within slider range
-            slider_value = max(0, min(100, slider_value))
-
-            # Block signals temporarily to prevent _update_weight_labels from firing
-            # and potentially altering config before load is complete
+            kw = float(getattr(self.config, "keyword_weight", 0.5))
+            sv = max(0, min(100, round(kw * 100)))
             slider.blockSignals(True)
-            slider.setValue(slider_value)
+            slider.setValue(sv)
             slider.blockSignals(False)
-
-            logger.debug(f"  Set hybrid_weight_slider value to {slider_value} (from config keyword_weight {kw_weight})")
-
-            # Manually call the label update after setting the slider value
-            # Ensure _update_weight_labels exists as a method on ConfigTab
             if hasattr(self, "_update_weight_labels"):
-                logger.debug("  Calling _update_weight_labels for slider.")
-                self._update_weight_labels(slider_value)
-                logger.debug("  _update_weight_labels finished.")
-            else:
-                 logger.warning("  _update_weight_labels method not found on ConfigTab instance.")
+                self._update_weight_labels(sv)
+        except Exception:
+            logger.exception("Failed to initialize hybrid weight slider.")
 
-        except Exception as e:
-             logger.error(f"Failed to set hybrid weight slider or update labels: {e}", exc_info=True)
-    else:
-        logger.debug("  Hybrid weight slider widget not found.")
-
-    # --- Initial visibility for API Key field based on provider ---
-    # This needs to be done AFTER the llm_provider combobox is loaded
-    logger.debug("Setting initial API Key field visibility.")
-    # Assuming toggle_api_key_visibility is a method of ConfigTab
+    # — API key field visibility based on provider —
     if hasattr(self, "toggle_api_key_visibility"):
         try:
-            self.toggle_api_key_visibility() # Call the method to set visibility based on current provider
-            logger.debug("Initial API Key field visibility set.")
+            self.toggle_api_key_visibility()
+        except Exception:
+            logger.exception("toggle_api_key_visibility() failed.")
+
+    logger.debug("Finished loading config into UI.")
+
+
+def save_values_to_config(self):
+    """Reads UI widgets back into self.config and QSettings, then notifies via signal."""
+    logger.debug("Saving UI values from widgets back into config...")
+
+    # — API Key —
+    api_key_widget = self.settings_widgets.get("openai_api_key_field")
+    if isinstance(api_key_widget, QLineEdit):
+        api_key = api_key_widget.text().strip()
+        try:
+            settings = getattr(self, "settings", QSettings("KnowledgeLLM", "App"))
+            settings.setValue("credentials/openai_api_key", api_key)
+            logger.debug(f"Stored OpenAI API key in QSettings (length={len(api_key)})")
         except Exception as e:
-             logger.error(f"Failed to set initial API key visibility: {e}", exc_info=True)
+            logger.error(
+                f"Failed to save OpenAI API key to QSettings: {e}", exc_info=True
+            )
+
+    # — Other config fields —
+    for key_path, widget in self.settings_widgets.items():
+        # skip the API‑key field (handled above)
+        if key_path == "openai_api_key_field":
+            continue
+
+        try:
+            if isinstance(widget, QLineEdit):
+                new_val = widget.text()
+            elif isinstance(widget, QSpinBox):
+                new_val = widget.value()
+            elif isinstance(widget, QDoubleSpinBox):
+                new_val = widget.value()
+            elif isinstance(widget, QCheckBox):
+                new_val = widget.isChecked()
+            elif isinstance(widget, QTextEdit):
+                new_val = widget.toPlainText()
+            elif isinstance(widget, QComboBox):
+                new_val = widget.currentText()
+            else:
+                logger.warning(
+                    f"save: unhandled widget type for '{key_path}': {type(widget)}"
+                )
+                continue
+        except Exception as e:
+            logger.error(f"Error reading widget '{key_path}': {e}", exc_info=True)
+            continue
+
+        # walk down into nested config object
+        parts = key_path.split(".")
+        target = self.config
+        for attr in parts[:-1]:
+            target = getattr(target, attr, None)
+            if target is None:
+                logger.warning(f"Cannot set '{key_path}': '{attr}' not found.")
+                break
+        else:
+            last = parts[-1]
+            if hasattr(target, last):
+                setattr(target, last, new_val)
+                logger.debug(f"Set config.{key_path} = {new_val!r}")
+            else:
+                logger.debug(f"Skipping unknown config field '{key_path}'")
+
+    logger.critical("--- DEBUGGING HYBRID SLIDER SAVE ---")
+    logger.critical(f"Type of self.ui_widgets: {type(self.ui_widgets)}")
+    logger.critical(f"Keys in self.ui_widgets: {list(self.ui_widgets.keys())}")
+    slider_widget_from_ui_widgets = self.ui_widgets.get("hybrid_weight_slider")
+    logger.critical(
+        f"Widget retrieved for 'hybrid_weight_slider': {slider_widget_from_ui_widgets}"
+    )
+    if slider_widget_from_ui_widgets is not None:
+        logger.critical(
+            f"Type of retrieved widget: {type(slider_widget_from_ui_widgets)}"
+        )
+        logger.critical(
+            f"Is it a QSlider? {isinstance(slider_widget_from_ui_widgets, QSlider)}"
+        )  # QSlider needs to be imported from PyQt6.QtWidgets here for isinstance
+
+    config_has_kw_attr = hasattr(self.config, "keyword_weight")
+    logger.critical(
+        f"Does self.config have 'keyword_weight' attribute? {config_has_kw_attr}"
+    )
+    if config_has_kw_attr:
+        logger.critical(
+            f"Value of self.config.keyword_weight BEFORE attempting to set: {getattr(self.config, 'keyword_weight', 'NOT FOUND')}"
+        )
+    logger.critical("--- END DEBUGGING HYBRID SLIDER SAVE ---")
+    # --- End Debugging ---
+
+    # — Hybrid slider → keyword_weight —
+    # slider = self.ui_widgets.get("hybrid_weight_slider") # Original line
+    slider = slider_widget_from_ui_widgets  # Use the one we just retrieved for debugging consistency
+    if slider and hasattr(self.config, "keyword_weight"):
+        kw = slider.value() / 100.0
+        setattr(self.config, "keyword_weight", kw)
+        logger.debug(f"Set config.keyword_weight = {kw}")  # This is the crucial log
     else:
-         logger.warning("toggle_api_key_visibility method not found on ConfigTab instance.")
+        # More detailed logging if the condition fails
+        if not slider:
+            logger.error(
+                "SAVE_VALUES: Hybrid weight slider widget NOT FOUND in ui_widgets with key 'hybrid_weight_slider'."
+            )
+        if slider and not hasattr(
+            self.config, "keyword_weight"
+        ):  # Check if slider was found but attr missing
+            logger.error(
+                "SAVE_VALUES: self.config object does NOT have attribute 'keyword_weight' (type of self.config: %s).",
+                type(self.config).__name__,
+            )
 
-
-    logger.debug("Loading config values into UI finished.")
+    # — Emit updated config —
+    try:
+        config_dict = self.config.model_dump()  # Pydantic V2
+    except AttributeError:
+        config_dict = self.config.dict()  # Pydantic V1
+    logger.info("Emitting configSaveRequested signal with updated config.")
+    self.configSaveRequested.emit(config_dict)

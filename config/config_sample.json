@@ -1,36 +1,82 @@
 {
     "llm_provider": "lm_studio",
-    "model": "phi-4-mini-instruct",
-    "prompt_template": "",
-    "response_format": "json",
-    "prompt_description": "",
+    "model": "lmstudio-community/Qwen3-0.6B-GGUF",
+    "prompt_template": "you are a helfull assistance. you provide answers based on the context provided. I fno context is provided, you weill say this and not provide an answer. </no_think>",
+    "prompt_description": "You are a helpful AI assistant. Use the provided context to answer the question.",
     "temperature": 0.2,
-    "assistant_name": "Buddy",
+    "assistant_name": "Assistant",
+    "lowercase": false,
     "ollama_server": "http://127.0.0.1:11435",
     "lm_studio_server": "http://localhost:1234",
     "jan_server": "http://localhost:1337",
     "data_directory": "",
     "log_path": "",
-    "embedding_directory": "",
-    "embedding_model_index": "BAAI/bge-small-en-v1.5",
-    "embedding_model_query": "BAAI/bge-small-en-v1.5",
+    "qdrant": {
+        "host": "localhost",
+        "port": 6333,
+        "collection_name": "knowledge_base_collection",
+        "api_key": "",
+        "startup_timeout_s": 60,
+        "check_interval_s": 2,
+        "quantization_enabled": false,
+        "quantization_always_ram": false,
+        "search_params": {},
+        "force_recreate": false,
+        "connection_retries": 3,
+        "connection_initial_delay": 1,
+        "client_timeout": 20,
+        "distance": "Cosine",
+        "fastembed": {
+            "batch_size": 16,
+            "parallel": 4
+        }
+    },
+    "embedding_model_index": "intfloat/e5-small",
+    "embedding_model_query": "intfloat/e5-small",
+    "model_prefixes": {
+        "default": {
+            "query": "",
+            "document": ""
+        },
+        "BAAI/bge-small-en-v1.5": {
+            "query": "",
+            "document": ""
+        },
+        "nomic-ai/nomic-embed-text-v1.5": {
+            "query": "search_query: ",
+            "document": "search_document: "
+        },
+        "Snowflake/snowflake-arctic-embed-m-v2.0": {
+            "query": "Represent this sentence for searching relevant passages: ",
+            "document": ""
+        },
+        "Alibaba-NLP/gte-modernbert-base": {
+            "query": "",
+            "document": ""
+        },
+        "google/bigbird-roberta-base": {
+            "query": "",
+            "document": ""
+        }
+    },
+    "embedding_trust_remote_code": true,
     "indexing_profile": "normal",
-    "chunk_size": 199,
-    "chunk_overlap": 101,
+    "chunk_size": 301,
+    "chunk_overlap": 100,
+    "relevance_threshold": 0.6,
     "indexing_batch_size": 100,
     "embedding_batch_size": 32,
-    "cache_enabled": true,
-    "top_k": 5,
-    "keyword_weight": 0.57,
-    "semantic_weight": 0.43,
-    "relevance_threshold": 0.55,
+    "cache_enabled": false,
+    "keyword_weight": 0.87,
+    "top_k": 7,
     "max_context_tokens": 4096,
     "enable_filtering": false,
     "preprocess": true,
     "reranker_model": "BAAI/bge-reranker-v2-m3",
     "top_k_rerank": 5,
+    "max_parallel_filters": 5,
     "scraping_max_depth": 3,
-    "scraping_user_agent": "Mozilla/5.0 (compatible; KnowledgeLLMBot/1.0)",
+    "scraping_user_agent": "Mozilla/5.0 (compatible; KnowledgeLLMBot/1.0; +https://github.com/your_repo)",
     "scraping_max_concurrent": 10,
     "scraping_timeout": 30,
     "gui_worker_animation_ms": 200,
@@ -43,25 +89,20 @@
         "level": "DEBUG",
         "format": "%(asctime)s - %(levelname)s - [%(name)s] - %(message)s",
         "max_bytes": 10485760,
-        "backup_count": 5,
+        "backup_count": 12,
         "console": true
-    },
-    "qdrant": {
-        "host": "localhost",
-        "port": 6333,
-        "collection_name": "knowledge_base_collection",
-        "api_key": "",
-        "startup_timeout_s": 60,
-        "check_interval_s": 2,
-        "quantization_enabled": false,
-        "quantization_always_ram": true,
-        "search_params": {},
-        "force_recreate": false  
     },
     "api": {
         "host": "127.0.0.1",
-        "port": 8005,
-        "auto_start": false
+        "port": 8000,
+        "auto_start": true
+    },
+    "normal": {
+        "chunk_size": 300,
+        "chunk_overlap": 150,
+        "enable_advanced_cleaning": false,
+        "boilerplate_removal": false,
+        "ocr_enabled_if_needed": false
     },
     "intense": {
         "chunk_size": 150,
@@ -71,7 +112,7 @@
         "ocr_enabled_if_needed": true
     },
     "scraped_websites": {},
-    "gui": {
-        "log_path": "default_log_path"
-    }
+    "gui": {},
+    "metadata_extraction_level": "basic",
+    "metadata_fields_to_extract": []
 }

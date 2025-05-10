@@ -3,11 +3,13 @@
 from PyQt6.QtWidgets import QTextEdit
 from PyQt6.QtCore import pyqtSignal, Qt
 
+
 class QueryTextEdit(QTextEdit):
     """
     Custom QTextEdit to emit a signal when Enter is pressed
     (unless Shift+Enter is held).
     """
+
     enterPressed = pyqtSignal()
 
     def keyPressEvent(self, event):

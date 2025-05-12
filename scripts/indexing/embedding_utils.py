@@ -1,8 +1,8 @@
 import logging
+from typing import Any, Dict, List, Optional, Union
+
 import torch
 from sentence_transformers import SentenceTransformer
-from typing import Optional, List, Union, Dict, Any
-import traceback  # For detailed error logging
 
 # Attempt to import default prefixes from config_models (canonical source)
 try:
@@ -19,6 +19,10 @@ except ImportError:
         },
         "default": {"query": "", "document": ""},  # Essential default
     }
+
+_loaded_models: Dict[
+    str, "PrefixAwareTransformer"
+] = {}  # Use forward reference for type hint
 
 logger = logging.getLogger(__name__)
 
@@ -118,21 +122,18 @@ class PrefixAwareTransformer(SentenceTransformer):
             "Use encode_query(), encode_queries(), encode_document(), or encode_documents()."
         )
 
-    # --- Get Embedding Dimension ---
+        # --- Get Embedding Dimension ---
+
     def get_sentence_embedding_dimension(self) -> int:
         """Returns the dimensionality of the sentence embeddings."""
         if not hasattr(self, "device") or self.device is None:
-            logging.error(
-                f"Model device not set for {self.model_name_or_path}, cannot get dimension."
+            raise RuntimeError(
+                f"Embedding model {self.model_name_or_path} has no assigned device."
             )
-            return -1
 
         logger.debug(f"Getting embedding dimension for {self.model_name_or_path}...")
-        embedding_dim = -1
 
-        # Option 1: Check underlying transformer model config (most reliable)
         try:
-            # Accessing protected attributes (_first_module) can be fragile
             if (
                 hasattr(self, "_first_module")
                 and callable(self._first_module)
@@ -140,86 +141,76 @@ class PrefixAwareTransformer(SentenceTransformer):
                 and hasattr(self._first_module().auto_model, "config")
                 and hasattr(self._first_module().auto_model.config, "hidden_size")
             ):
-                embedding_dim = self._first_module().auto_model.config.hidden_size
-                if isinstance(embedding_dim, int) and embedding_dim > 0:
-                    logger.info(
-                        f"Got dimension ({embedding_dim}) from model config hidden_size."
-                    )
-                    return embedding_dim
+                dim = self._first_module().auto_model.config.hidden_size
+                if isinstance(dim, int) and dim > 0:
+                    logger.info(f"Got dimension ({dim}) from model config hidden_size.")
+                    return dim
         except Exception as e:
-            logger.debug(
-                f"Failed to get dimension from model config: {e}. Trying fallback."
-            )
+            logger.warning(f"Failed to get dimension from config: {e}")
 
-        # Option 2: Fallback to encoding a dummy sentence
-        logger.warning("Falling back to dummy sentence encoding for dimension check.")
+        logger.warning("Falling back to dummy encode for dimension check.")
+        test_embedding = None
+        original_device = self.device
         try:
-            original_device = self.device
-            test_embedding = None
             with torch.no_grad():
                 try:
-                    # Use encode_document (or encode_query, shouldn't matter for dim)
                     test_embedding = self.encode_document(
                         "test", convert_to_tensor=True
                     )
-                except RuntimeError as e_oom:  # Handle OOM
-                    if "out of memory" in str(e_oom).lower():
-                        logger.warning("GPU OOM on dummy encode, retrying on CPU.")
+                except RuntimeError as e:
+                    if "out of memory" in str(e).lower():
+                        logger.warning("OOM on device, retrying on CPU.")
                         self.to("cpu")
                         test_embedding = self.encode_document(
-                            "test", convert_to_tensor=True, device="cpu"
+                            "test", convert_to_tensor=True
                         )
                         try:
-                            self.to(original_device)  # Try move back
+                            self.to(original_device)
                         except Exception as move_e:
                             logger.warning(
-                                f"Failed move back to {original_device}: {move_e}"
+                                f"Failed to move model back to original device: {move_e}"
                             )
                     else:
-                        raise  # Re-raise other RuntimeErrors
-                if test_embedding is None:
-                    raise ValueError("Dummy encode returned None")
+                        raise
 
-            # Infer from result shape/length
-            embedding_dim = -1
             if hasattr(test_embedding, "shape") and len(test_embedding.shape) > 0:
-                embedding_dim = test_embedding.shape[-1]
-            elif (
-                isinstance(test_embedding, list)
-                and test_embedding
-                and isinstance(test_embedding[0], (float, int))
-            ):
-                embedding_dim = len(test_embedding)
+                dim = test_embedding.shape[-1]
+            elif isinstance(test_embedding, list) and test_embedding:
+                dim = len(test_embedding)
+            else:
+                raise RuntimeError(
+                    "Could not determine embedding dimension from dummy encoding."
+                )
 
-            if embedding_dim <= 0:
-                raise ValueError("Could not determine positive dimension.")
-            logger.info(f"Got dimension ({embedding_dim}) via dummy encode fallback.")
-            return embedding_dim
+            if not isinstance(dim, int) or dim <= 0:
+                raise ValueError(f"Invalid inferred dimension: {dim}")
+
+            logger.info(f"Got dimension ({dim}) from dummy encode fallback.")
+            return dim
 
         except Exception as e:
-            logger.error(
-                f"All methods failed for getting embedding dimension: {e}",
-                exc_info=True,
-            )
-            return -1  # Indicate failure
+            raise RuntimeError(
+                f"Failed to infer embedding dimension from dummy encode: {e}"
+            ) from e
+
+        raise RuntimeError("All attempts to determine embedding dimension failed.")
 
 
-# --- Factory Function ---
 def load_prefix_aware_embedding_model(
     model_name_or_path: str,
     model_prefixes: Dict[str, Dict[str, str]],  # Full prefix map from config
-    trust_remote_code: bool,  # Flag from config
-    device: Optional[str] = None,  # Optional device override
+    trust_remote_code: bool,
+    device: Optional[str] = None,
 ) -> PrefixAwareTransformer:
-    """Loads a SentenceTransformer model wrapped with prefix handling,
-    auto-selecting and moving it to GPU if available."""
+    global _loaded_models
 
-    import logging
-    import torch
+    cache_key = f"{model_name_or_path}::{device or 'auto'}"
 
-    logger = logging.getLogger(__name__)
+    if cache_key in _loaded_models:
+        logger.info(f"Using cached model instance for {cache_key}")
+        return _loaded_models[cache_key]
 
-    # 1) Prepare the prefixes for this model (fall back to default if missing)
+    # 1) Prepare prefixes
     default_prefixes = {"query": "", "document": ""}
     prefixes = model_prefixes.get(model_name_or_path, default_prefixes)
     final_prefixes = {
@@ -227,18 +218,12 @@ def load_prefix_aware_embedding_model(
         "document": prefixes.get("document", ""),
     }
 
-    logger.info(
-        f"Factory loading PrefixAwareTransformer('{model_name_or_path}', "
-        f"trust_remote_code={trust_remote_code})"
-    )
+    logger.info(f"Loading PrefixAwareTransformer('{model_name_or_path}')")
 
-    # 2) Auto-select device if none specified
-    target_device = device
-    if target_device is None:
-        target_device = "cuda" if torch.cuda.is_available() else "cpu"
-        logger.info(f"No device specified, auto-selecting '{target_device}'")
+    # 2) Select device
+    target_device = device or ("cuda" if torch.cuda.is_available() else "cpu")
 
-    # 3) Instantiate the wrapper, passing the chosen device
+    # 3) Load model
     model = PrefixAwareTransformer(
         model_name_or_path=model_name_or_path,
         prefixes=final_prefixes,
@@ -246,11 +231,6 @@ def load_prefix_aware_embedding_model(
         device=target_device,
     )
 
-    # 4) Ensure the model parameters are moved to the selected device
-    try:
-        model.to(target_device)
-        logger.info(f"Moved PrefixAwareTransformer to {target_device}")
-    except Exception as e:
-        logger.warning(f"Could not move model to {target_device}: {e}")
-
+    # 4) Cache and return
+    _loaded_models[cache_key] = model
     return model

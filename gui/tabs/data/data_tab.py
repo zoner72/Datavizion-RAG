@@ -25,7 +25,6 @@ from PyQt6.QtCore import (
     pyqtSlot,
 )
 from PyQt6.QtWidgets import (
-    QApplication,
     QFileDialog,
     QLabel,  # Import QLabel for type hints
     QMessageBox,
@@ -149,8 +148,8 @@ class IndexWorker(BaseWorker):
                 )
             elif self.mode == "rebuild":
                 processed_count = self.index_manager.rebuild_index(
-                    progress_callback=progress_callback,
-                    worker_flag=worker_flag,
+                    progress_callback=self.progress.emit,
+                    worker_flag=worker_flag,  # ✅ Corrected
                 )
             else:
                 raise ValueError(f"Invalid mode: {self.mode}")
@@ -174,15 +173,12 @@ class IndexWorker(BaseWorker):
             self.error.emit("Index operation cancelled.")
         except Exception as e:
             logger.error(f"IndexWorker failed: {e}", exc_info=True)
-            # Check flag again before emitting error for unexpected exceptions
             if self._is_running:
                 self.error.emit(f"Index {self.mode} failed: {e}")
             else:
                 logger.info(f"Exception during cancelled IndexWorker operation: {e}")
                 self.error.emit("Index operation cancelled.")
-
         finally:
-            # Always quit the thread so Qt triggers the UI reset
             if thread and thread.isRunning():
                 logger.debug("IndexWorker run() finished; quitting thread.")
                 thread.quit()
@@ -358,7 +354,8 @@ class PDFDownloadWorker(BaseWorker):
         self.progress.emit(0, total)
 
         try:
-            for i, link in enumerate(self.pdf_links, start=1):
+            # Iterate over pdf_links, where each 'link_item' is expected to be a dictionary
+            for i, link_item in enumerate(self.pdf_links, start=1):
                 # Check cancellation flag at the start of each iteration
                 if not self._is_running:
                     self.statusUpdate.emit(
@@ -369,12 +366,35 @@ class PDFDownloadWorker(BaseWorker):
                 # Ensure progress updates frequently, even if skipping
                 self.progress.emit(i, total)
 
+                # --- Extract the actual URL string from the dictionary ---
+                if isinstance(link_item, dict):
+                    actual_pdf_url = link_item.get("pdf_url")
+                elif isinstance(
+                    link_item, str
+                ):  # Fallback if it's somehow already a string
+                    actual_pdf_url = link_item
+                else:
+                    logger.error(
+                        f"Invalid link item type: {type(link_item)}. Skipping: {link_item}"
+                    )
+                    failed += 1
+                    continue
+
+                if not actual_pdf_url or not isinstance(actual_pdf_url, str):
+                    logger.error(
+                        f"PDF URL missing or invalid in link data: {link_item}. Skipping."
+                    )
+                    failed += 1
+                    continue
+                # --- End URL extraction ---
+
                 # --- Improved Filename Sanitization ---
                 try:
-                    parsed = urlparse(link)
+                    # Use actual_pdf_url for parsing and hashing
+                    parsed = urlparse(actual_pdf_url)
                     name_base = os.path.basename(parsed.path)
                     if not name_base:  # Handle case where URL path ends in /
-                        name_base = hashlib.md5(link.encode()).hexdigest()[
+                        name_base = hashlib.md5(actual_pdf_url.encode()).hexdigest()[
                             :16
                         ]  # Use hash if no filename in URL
                     # Replace invalid chars, limit length, handle dots/underscores
@@ -389,19 +409,22 @@ class PDFDownloadWorker(BaseWorker):
                         r"[._]+$", "", safe_name
                     )  # Remove trailing dots/underscores
                     if not safe_name:  # Fallback if name becomes empty
-                        safe_name = hashlib.md5(link.encode()).hexdigest()[:16]
+                        safe_name = hashlib.md5(actual_pdf_url.encode()).hexdigest()[
+                            :16
+                        ]
                     # Ensure .pdf extension
                     if "." in safe_name:
                         base, ext = safe_name.rsplit(".", 1)
                         if ext.lower() != "pdf":
                             safe_name = f"{base}.pdf"  # Force pdf extension if wrong
                         elif not base:  # Handle names like ".pdf"
-                            safe_name = f"download_{hashlib.md5(link.encode()).hexdigest()[:8]}.pdf"
+                            safe_name = f"download_{hashlib.md5(actual_pdf_url.encode()).hexdigest()[:8]}.pdf"
                     else:
                         safe_name += ".pdf"
                 except Exception as fname_e:
+                    # Log with actual_pdf_url
                     logger.error(
-                        f"Error sanitizing filename for {link}: {fname_e}. Skipping."
+                        f"Error sanitizing filename for {actual_pdf_url}: {fname_e}. Skipping."
                     )
                     failed += 1
                     continue  # Skip this link
@@ -419,8 +442,9 @@ class PDFDownloadWorker(BaseWorker):
                     dest = original_dest.with_stem(f"{original_dest.stem}_{counter}")
                     counter += 1
                 if dest != original_dest:
+                    # Log with actual_pdf_url
                     logger.warning(
-                        f"Filename collision for {link}. Saving as {dest.name}"
+                        f"Filename collision for {actual_pdf_url}. Saving as {dest.name}"
                     )
                 # --- End Collision Handling ---
 
@@ -441,16 +465,21 @@ class PDFDownloadWorker(BaseWorker):
                     timeout_seconds = (
                         getattr(self.config, "scraping_timeout", 30) * 2
                     )  # Allow longer for downloads
+                    # Use actual_pdf_url for the GET request
                     resp = self._session.get(
-                        link, stream=True, timeout=timeout_seconds, headers=headers
+                        actual_pdf_url,
+                        stream=True,
+                        timeout=timeout_seconds,
+                        headers=headers,
                     )
                     resp.raise_for_status()  # Raise HTTPError for bad responses (4xx or 5xx)
 
                     # Optional: Check Content-Type header if available
                     content_type = resp.headers.get("Content-Type", "")
                     if "application/pdf" not in content_type.lower():
+                        # Log with actual_pdf_url
                         logger.warning(
-                            f"Skipping {link}: Content-Type ({content_type}) is not PDF."
+                            f"Skipping {actual_pdf_url}: Content-Type ({content_type}) is not PDF."
                         )
                         failed += 1  # Count as failed download of non-PDF
                         continue  # Skip saving non-PDF content
@@ -469,19 +498,22 @@ class PDFDownloadWorker(BaseWorker):
 
                     downloaded += 1
                     downloaded_paths.append(str(dest))
+                    # Log with actual_pdf_url
                     logger.debug(
-                        f"Downloaded: {link} -> {dest.name}"
+                        f"Downloaded: {actual_pdf_url} -> {dest.name}"
                     )  # Log successful download
 
                 except InterruptedError:
-                    logger.info(f"Download cancelled for {link}.")
+                    # Log with actual_pdf_url
+                    logger.info(f"Download cancelled for {actual_pdf_url}.")
                     failed += 1  # Count cancelled as failed
                     # The break is handled by the outer loop's check
                     break  # Exit the main download loop immediately on cancellation
                 except requests.exceptions.RequestException as req_e:
                     failed += 1
+                    # Log with actual_pdf_url
                     logger.error(
-                        f"Download failed for {link}: {req_e}", exc_info=False
+                        f"Download failed for {actual_pdf_url}: {req_e}", exc_info=False
                     )  # Log error without traceback for every file
                     # Clean up potentially created empty file
                     if dest.exists():
@@ -490,8 +522,10 @@ class PDFDownloadWorker(BaseWorker):
                     Exception
                 ) as e:  # Catch any other unexpected errors during download/save
                     failed += 1
+                    # Log with actual_pdf_url
                     logger.error(
-                        f"Unexpected error downloading {link}: {e}", exc_info=True
+                        f"Unexpected error downloading {actual_pdf_url}: {e}",
+                        exc_info=True,
                     )
                     if dest.exists():
                         dest.unlink(missing_ok=True)
@@ -749,8 +783,6 @@ class DataTab(QWidget):
 
         self.config = config
         self.main_window = parent
-        # Get index_manager from parent (MainWindow), might be None initially.
-        # This will be properly updated by update_components_from_config later.
         self.index_manager = getattr(parent, "index_manager", None)
         self.project_root = (
             Path(project_root) if project_root else Path(__file__).resolve().parents[3]
@@ -761,26 +793,15 @@ class DataTab(QWidget):
 
         self._stats_last_run_time = 0
 
-        # --- Plan Step 2: Add _is_initial_scan_finished Flag ---
         self._is_initial_scan_finished = False
-        # --- End Plan Step 2 ---
-
         self.setAcceptDrops(True)
 
         self.init_ui()  # Creates UI elements
         from .data_tab_handlers import DataTabHandlers  # Delayed import
 
-        self.handlers = DataTabHandlers(
-            self, config
-        )  # Handlers now have access to self.tab
-        self.handlers.wire_signals()
+        self.handlers = DataTabHandlers(self, config)
         self._load_settings()  # This is where the premature scan was likely triggered
-
-        app = QApplication.instance()
-        if app:
-            app.aboutToQuit.connect(
-                self.request_stop_all_workers, Qt.ConnectionType.DirectConnection
-            )
+        QTimer.singleShot(0, self.handlers.wire_signals)  # Defer signal wiring
 
     def start_background_workers(self):
         logger.info("DataTab: start_background_workers called.")
@@ -831,6 +852,154 @@ class DataTab(QWidget):
         # re-load anything you need from the new config:
         self._load_settings()
         # or fire whatever handlers update your UI
+
+    def start_index_stats_update(self):
+        """Starts the IndexStatsWorker (only once index_manager is available)."""
+
+        # --- don't run stats until index_manager is ready ---
+        if not self.index_manager:
+            logger.info("Index manager unavailable; skipping initial stats update.")
+            # Optionally update UI to show unavailable status
+            self.update_health_summary(status="Unavailable", vectors=0)
+            return
+        # --- end guard ---
+        # Check if this specific worker is already running
+        stats_key = "index_stats"
+        if (
+            stats_key in self._active_threads
+            and self._active_threads[stats_key].isRunning()
+        ):
+            logger.debug("Index stats update is already running.")
+            return
+
+        logger.info("Starting index stats worker.")
+        # Start the worker using the generic method
+        worker, thread = self.start_background_worker(IndexStatsWorker, key=stats_key)
+        if worker:
+            # Connect finished signal specifically for IndexStatsWorker
+            # This slot will delegate to the handler
+            worker.finished.connect(self._handle_index_stats_finished_internal)
+            # Error and status updates are connected in start_background_worker
+
+    def start_index_operation(
+        self,
+        mode: str,
+        file_paths: list[str] | None = None,
+        url_for_status: str | None = None,
+    ):
+        """Starts an IndexWorker operation (add, refresh, rebuild)."""
+
+        def _do_start():
+            if self.is_busy():
+                self.show_message(
+                    "Busy",
+                    "Another primary operation is already in progress.",
+                    QMessageBox.Icon.Warning,
+                )
+                return
+
+            # Ensure index manager is available before starting worker
+            if not self.index_manager:
+                self.show_message(
+                    "Error",
+                    "Index Manager is not available. Cannot start index operation.",
+                    QMessageBox.Icon.Critical,
+                )
+                return
+
+            worker, thread = self.start_background_worker(
+                IndexWorker,
+                key="primary_operation",
+                mode=mode,
+                file_paths=file_paths,
+            )
+
+            if not worker:
+                return
+
+            def on_index_finished(result: dict):
+                # 1) Show completion dialog
+                self.show_message(
+                    f"Index {mode.capitalize()} Complete",
+                    f"Index {mode} operation finished successfully.",
+                )
+                # 2) Update the "Website Indexed" & "PDFs Indexed" columns
+                if url_for_status:
+                    pdf_count = result.get("processed") if mode == "add" else None
+                    self.set_indexed_status_for_url(url_for_status, True, pdf_count)
+                # Update all rows if it was a full refresh/rebuild?
+                # This might be slow. Maybe just update health summary.
+                # Let's keep the original logic for now.
+                elif hasattr(self, "scraped_websites_table"):
+                    table = self.scraped_websites_table
+                    for row in range(table.rowCount()):
+                        url_item = table.item(row, 0)
+                        if url_item:
+                            url = url_item.text()
+                            pdf_item = table.item(row, 3)
+                            try:
+                                count = int(pdf_item.text()) if pdf_item else None
+                            except (ValueError, TypeError):
+                                count = None
+                            self.set_indexed_status_for_url(url, True, count)
+                else:
+                    logger.warning("scraped_websites_table not found to update status.")
+
+                # 3) Persist to JSON (if tracking website state)
+                if hasattr(self.handlers, "save_tracked_websites"):
+                    self.handlers.save_tracked_websites()
+
+                # 4) Update main window statusbar via signal
+                try:
+                    # Check index_manager again, it might have become None due to errors
+                    if self.index_manager:
+                        live_vector_count = self.index_manager.count()
+                        count_str = (
+                            f"{live_vector_count:,}"
+                            if live_vector_count is not None
+                            else "Unknown"
+                        )
+                        self.indexStatusUpdate.emit(
+                            f"Index: {count_str}"
+                        )  # Emit formatted string
+                    else:
+                        self.indexStatusUpdate.emit("Index: N/A")
+                except Exception as e:
+                    logger.error(f"Error fetching live vector count: {e}")
+                    self.indexStatusUpdate.emit("Index: Error")
+
+                # 5) Immediately update the Health panel
+                try:
+                    # Check index_manager again
+                    if self.index_manager:
+                        fresh_count = self.index_manager.count() or 0
+                        self.update_health_summary(
+                            status="Ready", vectors=fresh_count, last_op=mode
+                        )
+                    else:
+                        self.update_health_summary(
+                            status="Error", vectors=0, last_op=mode
+                        )
+                except Exception as e:
+                    logger.warning(f"Could not immediately refresh health panel: {e}")
+
+                # 6) Update LLM status if present (This seems less relevant here)
+                # Maybe emit a general 'index_updated' signal instead?
+                # Keeping original logic for now.
+                if hasattr(
+                    self.main_window, "_on_llm_status"
+                ):  # Check if main window has the slot
+                    # Use invokeMethod to call slot on main window thread
+                    QMetaObject.invokeMethod(
+                        self.main_window,
+                        "_on_llm_status",
+                        Qt.ConnectionType.QueuedConnection,
+                        Q_ARG(str, "Ready"),
+                    )
+
+            worker.finished.connect(on_index_finished)
+
+        QTimer.singleShot(0, _do_start)
 
     def dragEnterEvent(self, event):
         md = event.mimeData()
@@ -1408,9 +1577,8 @@ class DataTab(QWidget):
         return worker, thread
 
     def start_refresh_index(self):
-        # 🔧 FIX: if embedding dimension changed since last index, require rebuild
+        # ✅ 1. Get model embedding dimension
         try:
-            # Ensure main_window and its attributes exist before accessing
             if (
                 not self.main_window
                 or not hasattr(self.main_window, "embedding_model_index")
@@ -1419,187 +1587,92 @@ class DataTab(QWidget):
                 raise AttributeError(
                     "Index embedding model not available on main window."
                 )
-            # Assuming embedding_model_index is PrefixAwareTransformer with get_sentence_embedding_dimension
             model_dim = self.main_window.embedding_model_index.get_sentence_embedding_dimension()
-        except AttributeError as e:
-            logger.error(f"Could not get embedding dimension from model: {e}")
+            if model_dim is None or not isinstance(model_dim, int) or model_dim <= 0:
+                raise ValueError("Invalid or unavailable embedding model dimension.")
+        except Exception as e:
+            logger.error(
+                f"Failed to get embedding dimension from model: {e}", exc_info=True
+            )
             self.show_message(
                 "Error",
                 "Could not determine embedding model dimension.",
-                QMessageBox.Icon.Warning,
-            )
-            return
-        except Exception as e:  # Catch other potential errors
-            logger.error(
-                f"Unexpected error getting embedding dimension: {e}", exc_info=True
-            )
-            self.show_message(
-                "Error",
-                f"Error checking embedding dimension:\n{e}",
                 QMessageBox.Icon.Critical,
             )
             return
 
+        # ✅ 2. Get existing index dimension
         try:
-            # Ensure index_manager exists before accessing vector_size
             if not self.index_manager:
                 raise AttributeError("Index manager not available.")
             index_dim = getattr(self.index_manager, "vector_size", None)
-        except AttributeError as e:
-            logger.error(f"Could not get index dimension from manager: {e}")
+        except Exception as e:
+            logger.error(f"Failed to get index dimension: {e}", exc_info=True)
             self.show_message(
                 "Error",
                 "Could not determine current index dimension.",
-                QMessageBox.Icon.Warning,
-            )
-            return
-        except Exception as e:  # Catch other potential errors
-            logger.error(
-                f"Unexpected error getting index dimension: {e}", exc_info=True
-            )
-            self.show_message(
-                "Error",
-                f"Error checking index dimension:\n{e}",
                 QMessageBox.Icon.Critical,
             )
             return
 
+        # ✅ 3. Auto-trigger rebuild if model and index dimensions differ
         if index_dim is not None and model_dim is not None and model_dim != index_dim:
-            reply = QMessageBox.question(
-                self,
-                "Rebuild Required",
-                (
-                    f"Current index was built with embeddings of size {index_dim},\n"
-                    f"but the configured model now produces size {model_dim}.\n"
-                    "A full rebuild is required. Rebuild now?"
-                ),
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.Yes,
+            logger.warning(
+                f"Embedding dimension mismatch: model={model_dim}, index={index_dim}. Triggering automatic rebuild."
             )
-            if reply == QMessageBox.StandardButton.Yes:
-                self.start_index_operation(mode="rebuild")
+            self.update_status("Embedding size mismatch detected. Rebuilding index...")
+            self.start_index_operation(mode="rebuild")
             return
 
-        # no dimension mismatch → safe to refresh
+        # ✅ 4. Trigger rebuild if index is empty
+        try:
+            vector_count = self.index_manager.get_vector_count()
+            if vector_count == 0:
+                logger.info("Index is empty. Triggering rebuild.")
+                self.start_index_operation(mode="rebuild")
+                return
+        except Exception as e:
+            logger.error(f"Could not get vector count: {e}", exc_info=True)
+            self.show_message(
+                "Error",
+                "Failed to check index contents before refresh.",
+                QMessageBox.Icon.Warning,
+            )
+            return
+
+        # ✅ 5. Fingerprint model identity check (even if dimensions match)
+        try:
+            fp = self.index_manager.get_index_fingerprint()
+            current_name = getattr(
+                self.main_window.embedding_model_index, "model_name_or_path", None
+            )
+            if fp and current_name:
+                old_name = fp.get("embedding_model_name")
+                old_dim = fp.get("embedding_model_dim")
+                if old_name and current_name != old_name:
+                    prompt = self.prompt_confirm(
+                        "Rebuild Index",
+                        f"The index was built with model '{old_name}', but the current model is '{current_name}'. "
+                        "Rebuilding is required to avoid inconsistent embeddings. Rebuild now?",
+                    )
+                    if not prompt:
+                        logger.info("User declined rebuild on model change.")
+                        self.show_message(
+                            "Index Not Updated",
+                            "Embedding model has changed; no data was indexed.",
+                            QMessageBox.Icon.Warning,
+                        )
+                        return
+                    self.update_status("Rebuilding index for new embedding model...")
+                    self.start_index_operation(mode="rebuild")
+                    return
+        except Exception as e:
+            logger.warning(f"Could not verify fingerprint during refresh: {e}")
+
+        # ✅ 6. Proceed with refresh
+        logger.info("Refreshing index (dimensions and vector count OK).")
         self.start_index_operation(mode="refresh")
         self.handlers.run_summary_update()
-
-    def start_index_operation(
-        self,
-        mode: str,
-        file_paths: list[str] | None = None,
-        url_for_status: str | None = None,
-    ):
-        """Starts an IndexWorker operation (add, refresh, rebuild)."""
-
-        def _do_start():
-            if self.is_busy():
-                self.show_message(
-                    "Busy",
-                    "Another primary operation is already in progress.",
-                    QMessageBox.Icon.Warning,
-                )
-                return
-
-            # Ensure index manager is available before starting worker
-            if not self.index_manager:
-                self.show_message(
-                    "Error",
-                    "Index Manager is not available. Cannot start index operation.",
-                    QMessageBox.Icon.Critical,
-                )
-                return
-
-            worker, thread = self.start_background_worker(
-                IndexWorker, key="primary_operation", mode=mode, file_paths=file_paths
-            )
-
-            if not worker:
-                return
-
-            def on_index_finished(result: dict):
-                # 1) Show completion dialog
-                self.show_message(
-                    f"Index {mode.capitalize()} Complete",
-                    f"Index {mode} operation finished successfully.",
-                )
-                # 2) Update the "Website Indexed" & "PDFs Indexed" columns
-                if url_for_status:
-                    pdf_count = result.get("processed") if mode == "add" else None
-                    self.set_indexed_status_for_url(url_for_status, True, pdf_count)
-                # Update all rows if it was a full refresh/rebuild?
-                # This might be slow. Maybe just update health summary.
-                # Let's keep the original logic for now.
-                elif hasattr(self, "scraped_websites_table"):
-                    table = self.scraped_websites_table
-                    for row in range(table.rowCount()):
-                        url_item = table.item(row, 0)
-                        if url_item:
-                            url = url_item.text()
-                            pdf_item = table.item(row, 3)
-                            try:
-                                count = int(pdf_item.text()) if pdf_item else None
-                            except (ValueError, TypeError):
-                                count = None
-                            self.set_indexed_status_for_url(url, True, count)
-                else:
-                    logger.warning("scraped_websites_table not found to update status.")
-
-                # 3) Persist to JSON (if tracking website state)
-                if hasattr(self.handlers, "save_tracked_websites"):
-                    self.handlers.save_tracked_websites()
-
-                # 4) Update main window statusbar via signal
-                try:
-                    # Check index_manager again, it might have become None due to errors
-                    if self.index_manager:
-                        live_vector_count = self.index_manager.count()
-                        count_str = (
-                            f"{live_vector_count:,}"
-                            if live_vector_count is not None
-                            else "Unknown"
-                        )
-                        self.indexStatusUpdate.emit(
-                            f"Index: {count_str}"
-                        )  # Emit formatted string
-                    else:
-                        self.indexStatusUpdate.emit("Index: N/A")
-                except Exception as e:
-                    logger.error(f"Error fetching live vector count: {e}")
-                    self.indexStatusUpdate.emit("Index: Error")
-
-                # 5) Immediately update the Health panel
-                try:
-                    # Check index_manager again
-                    if self.index_manager:
-                        fresh_count = self.index_manager.count() or 0
-                        self.update_health_summary(
-                            status="Ready", vectors=fresh_count, last_op=mode
-                        )
-                    else:
-                        self.update_health_summary(
-                            status="Error", vectors=0, last_op=mode
-                        )
-                except Exception as e:
-                    logger.warning(f"Could not immediately refresh health panel: {e}")
-
-                # 6) Update LLM status if present (This seems less relevant here)
-                # Maybe emit a general 'index_updated' signal instead?
-                # Keeping original logic for now.
-                if hasattr(
-                    self.main_window, "_on_llm_status"
-                ):  # Check if main window has the slot
-                    # Use invokeMethod to call slot on main window thread
-                    QMetaObject.invokeMethod(
-                        self.main_window,
-                        "_on_llm_status",
-                        Qt.ConnectionType.QueuedConnection,
-                        Q_ARG(str, "Ready"),
-                    )
-
-            worker.finished.connect(on_index_finished)
-
-        QTimer.singleShot(0, _do_start)
 
     def start_scrape_website(self):
         """Handles UI interaction and defers scrape start."""
@@ -1613,7 +1686,9 @@ class DataTab(QWidget):
         url = self.url_input.text().strip()
         if not url:
             self.show_message(
-                "Missing URL", "Please enter a website URL.", QMessageBox.Icon.Warning
+                "Missing URL",
+                "Please enter a website URL.",
+                QMessageBox.Icon.Warning,
             )
             return
         sanitized_url = self.sanitize_url(url)
@@ -1637,7 +1712,9 @@ class DataTab(QWidget):
                 or not self.config.data_directory
             ):
                 self.show_message(
-                    "Error", "Data directory not configured.", QMessageBox.Icon.Critical
+                    "Error",
+                    "Data directory not configured.",
+                    QMessageBox.Icon.Critical,
                 )
                 return
 
@@ -1895,34 +1972,6 @@ class DataTab(QWidget):
             # Connect finished signal specifically for LocalFileScanWorker
             # The slot update_local_file_count_from_object will handle emitting initialScanComplete
             worker.finished.connect(self.update_local_file_count_from_object)
-            # Error and status updates are connected in start_background_worker
-
-    def start_index_stats_update(self):
-        """Starts the IndexStatsWorker (only once index_manager is available)."""
-
-        # --- don't run stats until index_manager is ready ---
-        if not self.index_manager:
-            logger.info("Index manager unavailable; skipping initial stats update.")
-            # Optionally update UI to show unavailable status
-            self.update_health_summary(status="Unavailable", vectors=0)
-            return
-        # --- end guard ---
-        # Check if this specific worker is already running
-        stats_key = "index_stats"
-        if (
-            stats_key in self._active_threads
-            and self._active_threads[stats_key].isRunning()
-        ):
-            logger.debug("Index stats update is already running.")
-            return
-
-        logger.info("Starting index stats worker.")
-        # Start the worker using the generic method
-        worker, thread = self.start_background_worker(IndexStatsWorker, key=stats_key)
-        if worker:
-            # Connect finished signal specifically for IndexStatsWorker
-            # This slot will delegate to the handler
-            worker.finished.connect(self._handle_index_stats_finished_internal)
             # Error and status updates are connected in start_background_worker
 
     @pyqtSlot(object)

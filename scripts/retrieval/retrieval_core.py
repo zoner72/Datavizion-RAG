@@ -1,9 +1,9 @@
 # File: scripts/retrieval/retrieval_core.py
 
 import asyncio
-import logging
 import functools
-from typing import List, Dict, Tuple, Optional, Callable  # Added Optional, Callable
+import logging
+from typing import Callable, Dict, List, Optional, Tuple  # Added Optional, Callable
 
 import torch  # Keep torch import for device check
 
@@ -113,12 +113,14 @@ class MemoryContextManager:
             logger.error(
                 "MemoryContextManager initialized without query_embedding_model!"
             )
-
+        # --- Optional: Rerank using CrossEncoder if configured ---
+        # reranker = get_cross_encoder(self.config)
+        reranker = (
+            get_cross_encoder(self.config) if self.config.enable_reranking else None
+        )
         logger.debug(
             f"MemoryContextManager initialized. Max tokens: {self.max_tokens}, Threshold: {self.relevance_threshold}"
         )
-
-    # --- End __init__ update ---
 
     async def get_context_for_query(
         self, query: str, conversation_id: str, use_filters: bool = False
@@ -134,7 +136,6 @@ class MemoryContextManager:
             A tuple containing:
             - list[str]: A list of text chunks forming the context.
             - list[tuple[str, str, float]]: A list of retrieved documents (filepath, text, score).
-
         """
         if not self.index_manager or not self.query_embedding_model:
             logger.error(
@@ -142,22 +143,18 @@ class MemoryContextManager:
             )
             return [], []
 
-        # Decide filtering based on argument and config attribute
-        # Only use filters if explicitly requested AND enabled in config
         use_filters = use_filters and self.config.enable_filtering
         logger.info(f"Context retrieval: Use memory filters: {use_filters}")
 
         context_chunks: List[str] = []
         retrieved_docs: List[Tuple[str, str, float]] = []
-        results = []  # Will hold QdrantResult objects or similar
+        results = []
 
-        # Get top_k from config attribute
         top_k_val = self.config.top_k
         filter_list: List[Optional[Dict]] = (
             self.get_related_filters(conversation_id) if use_filters else [{}]
-        )  # Start with empty filter if no history/filters off
+        )
 
-        # --- Parallel Search (using configured top_k) ---
         try:
             logger.debug(
                 f"Attempting parallel search with {len(filter_list)} filters, top_k={top_k_val}..."
@@ -167,46 +164,36 @@ class MemoryContextManager:
                 index_manager=self.index_manager,
                 query_embedding_model=self.query_embedding_model,
                 filter_list=filter_list,
-                top_k=top_k_val,  # Pass configured top_k
+                top_k=top_k_val,
             )
             logger.info(f"Parallel search found {len(results)} total results.")
         except Exception as e:
             logger.warning(f"Parallel search failed, falling back: {e}", exc_info=True)
-            results = []  # Ensure results is empty list on failure
+            results = []
 
-        # --- Fallback to unfiltered search if filters yielded nothing ---
-        # Important: Only retry WITHOUT filters if the initial attempt *used* filters and failed
         if not results and use_filters:
             logger.warning(
                 "No results with filters. Retrying full search without filters..."
             )
-            # Recursive call, explicitly setting use_filters to False
-            # Be cautious with recursion depth if errors persist
             return await self.get_context_for_query(
                 query, conversation_id, use_filters=False
             )
 
-        # --- Final fallback if STILL nothing (even after unfiltered search) ---
-        # This block runs if the parallel search (filtered or unfiltered) returned nothing initially.
         if not results:
             try:
                 logger.info(
                     f"No results from parallel search. Attempting final fallback sync search (top_k={top_k_val})..."
                 )
-                # Ensure event loop exists for run_in_executor if called from sync context potentially
-                # loop = asyncio.get_running_loop() # Not needed if called from async context
                 search_func = functools.partial(
                     self.index_manager.search,
                     query_text=query,
                     query_embedding_model=self.query_embedding_model,
                     top_k=top_k_val,
-                    filters=None,  # Explicitly no filters for fallback
+                    filters=None,
                 )
-                # Run the synchronous search method in an executor
-                # results = await loop.run_in_executor(None, search_func) # If loop needed
-                results = await run_in_executor(search_func)  # Use helper
+                results = await run_in_executor(search_func)
                 if results is None:
-                    results = []  # Ensure list
+                    results = []
                 logger.info(f"Fallback sync search found {len(results)} results.")
             except Exception as fallback_e:
                 logger.error(
@@ -214,15 +201,47 @@ class MemoryContextManager:
                 )
                 results = []
 
-        # --- Filter and collect good results ---
+        # --- Optional: Rerank using CrossEncoder if configured ---
+        # Inside get_context_for_query after retrieval fallback
+        reranker = (
+            get_cross_encoder(self.config) if self.config.enable_reranking else None
+        )
+        if reranker:
+            try:
+                rerank_inputs = []
+                rerank_meta = []
+
+                for hit in results:
+                    if (
+                        hit
+                        and hasattr(hit, "payload")
+                        and "text_with_context" in hit.payload
+                    ):
+                        chunk_text = hit.payload["text_with_context"].strip()
+                        if chunk_text:
+                            rerank_inputs.append((query, chunk_text))
+                            rerank_meta.append(hit)
+
+                if rerank_inputs:
+                    logger.info(
+                        f"Reranking {len(rerank_inputs)} results with CrossEncoder."
+                    )
+                    rerank_scores = reranker.predict(rerank_inputs)
+
+                    scored = list(zip(rerank_meta, rerank_scores))
+                    scored.sort(key=lambda x: x[1], reverse=True)
+                    results = [item[0] for item in scored]
+                else:
+                    logger.warning("No rerankable inputs found in results.")
+            except Exception as e:
+                logger.warning(f"Reranking failed: {e}", exc_info=True)
+
         logger.debug(
             f"Filtering {len(results)} results by threshold {self.relevance_threshold}..."
         )
-        unique_doc_texts = set()  # Track unique text content to avoid duplicates
+        unique_doc_texts = set()
 
         for hit in results:
-            # Ensure hit has expected attributes/structure before processing
-            # QdrantResult structure assumed here from qdrant_index_manager
             if (
                 hit
                 and hasattr(hit, "score")
@@ -231,39 +250,30 @@ class MemoryContextManager:
             ):
                 if hit.score >= self.relevance_threshold:
                     try:
-                        # Use .get for safe access within payload
-                        # Try 'text_with_context' first, fallback to 'text'
                         text = hit.payload.get(
                             "text_with_context", hit.payload.get("text", "")
                         )
-                        # Check metadata exists before accessing filepath
                         metadata = hit.payload.get("metadata", {})
                         filepath = metadata.get("source_filepath", "Unknown Filepath")
 
                         if text and isinstance(text, str):
                             text_content = text.strip()
-                            # Avoid adding duplicate content even if from different sources/scores initially
                             if text_content and text_content not in unique_doc_texts:
-                                context_chunks.append(text_content)  # Use stripped text
+                                context_chunks.append(text_content)
                                 retrieved_docs.append(
                                     (filepath, text_content, float(hit.score))
                                 )
                                 unique_doc_texts.add(text_content)
-                        # else: logging.debug("Hit payload missing text.") # Can be noisy
                     except Exception as payload_e:
                         logger.warning(
                             f"Error processing payload: {payload_e} - Hit: {getattr(hit, 'id', 'N/A')}"
                         )
-                # else: logging.debug(f"Hit score {hit.score:.4f} below threshold {self.relevance_threshold}") # Can be noisy
             else:
-                # Log invalid hit structure
                 logger.debug(
                     f"Skipping invalid hit (missing score/payload or invalid score type): {hit}"
                 )
 
-        # Sort final docs by score before returning
         retrieved_docs.sort(key=lambda x: x[2], reverse=True)
-
         logger.info(
             f"Context retrieval finished. Returning {len(context_chunks)} unique context chunks and {len(retrieved_docs)} documents."
         )
@@ -287,58 +297,72 @@ class MemoryContextManager:
         )
         logger.debug(f"Updated memory for conversation ID: {conversation_id}")
 
+    def get_document_by_filepath(self, filepath: str) -> Optional[Dict]:
+        # Inside your index_manager
+        # You can do a Qdrant filtered search like:
+        return self.search(
+            query_text="dummy",  # Placeholder since we only want the document
+            query_embedding_model=None,  # Not needed if you override search logic
+            top_k=1,
+            filters={"metadata.source_filepath": filepath},
+            return_payload_only=True,  # You may need to support this
+        )[0]  # Safely access result
+
     def get_related_filters(self, conversation_id):
         """Generates potential Qdrant filters based on conversation history."""
-        # This logic can be quite complex and domain-specific.
-        # Kept simple example: Use metadata from last retrieved docs.
         memory = self.memory.get(conversation_id, [])
         filters = []
+
         if not memory:
-            # Default filters for a new conversation - Consider making these configurable
-            # Example: Prioritize certain document types or sources
-            # filters = [{"metadata.doc_type": "manual"}, {"metadata.source": "specifications"}]
-            filters = [{}]  # Default to no specific filter for new conv
-            logger.debug("No memory found, using default filters (currently none).")
-        else:
-            try:
-                # Example: Extract filters from the *last* turn's retrieved docs
-                last_turn = memory[-1]
-                docs_from_last_turn = last_turn.get("retrieved_docs", [])
+            filters = [{}]  # Fallback: no filters
+            logger.debug("No memory found, using default unfiltered context.")
+            return filters
 
-                # Limit how many docs to base filters on to avoid overly broad filters
-                max_docs_for_filter = 3
-                for filepath, _, _ in docs_from_last_turn[:max_docs_for_filter]:
-                    # Example filter logic - adapt based on your metadata structure
-                    if filepath and filepath != "Unknown Filepath":
-                        # Filter by the specific file this chunk came from
-                        filters.append({"metadata.source_filepath": filepath})
-                        # Example: If filename suggests a type, filter by that type
-                        # if "manual" in filepath.lower(): filters.append({"metadata.doc_type": "manual"})
-                        # elif "spec" in filepath.lower(): filters.append({"metadata.doc_type": "specification"})
+        try:
+            last_turn = memory[-1]
+            docs_from_last_turn = last_turn.get("retrieved_docs", [])
 
-                # Keep filters unique (convert dicts to comparable tuples)
-                # Important: Sort items within dicts for consistent tuple comparison
-                unique_filters_tuples = {tuple(sorted(d.items())) for d in filters}
-                filters = [dict(t) for t in unique_filters_tuples]
+            max_docs_for_filter = 3
+            for filepath, _, _ in docs_from_last_turn[:max_docs_for_filter]:
+                # Try to retrieve full metadata for this document from the index
+                doc = self.index_manager.get_document_by_filepath(
+                    filepath
+                )  # You’ll need to implement this
+                if not doc:
+                    continue
 
-                # Add a default fallback filter if history-based ones are generated
-                # Or maybe just use the generated ones? Let's just use generated ones.
-                # if not filters: filters = [{}] # Ensure at least one empty filter if logic yields none
+                meta = doc.get("metadata", {})
 
-                logger.debug(
-                    f"Generated {len(filters)} filters based on memory: {filters}"
-                )
+                # Always allow source_filepath
+                if "source_filepath" in meta:
+                    filters.append(
+                        {"metadata.source_filepath": meta["source_filepath"]}
+                    )
 
-            except Exception as e:
-                logger.error(
-                    f"Error generating filters from memory: {e}", exc_info=True
-                )
-                filters = [{}]  # Fallback to no specific filter on error
+                # Add doc_type filter if available
+                if "doc_type" in meta:
+                    filters.append({"metadata.doc_type": meta["doc_type"]})
 
-        max_parallel_filters = self.config.max_parallel_filters
-        return (
-            filters[:max_parallel_filters] if filters else [{}]
-        )  # Ensure return list isn't empty
+                # Add tags if present (explode into multiple filters)
+                if isinstance(meta.get("tags"), list):
+                    for tag in meta["tags"]:
+                        filters.append({"metadata.tags": tag})
+
+                # Add title-based filters cautiously (for named docs)
+                if "source_title" in meta and len(meta["source_title"].split()) <= 8:
+                    filters.append({"metadata.source_title": meta["source_title"]})
+
+            # Ensure uniqueness (dict to tuple → back to dict)
+            filters = [dict(t) for t in {tuple(sorted(f.items())) for f in filters}]
+
+            logger.debug(f"Generated {len(filters)} filters from metadata context.")
+
+        except Exception as e:
+            logger.error(f"Error generating filters from metadata: {e}", exc_info=True)
+            filters = [{}]
+
+        return filters[: self.config.max_parallel_filters] or [{}]
+
 
 async def run_in_executor(func: Callable, *args, **kwargs):
     """Runs a synchronous function in the default thread pool."""

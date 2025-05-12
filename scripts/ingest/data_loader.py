@@ -1,15 +1,13 @@
 # --- START OF FILE scripts/ingest/data_loader.py ---
 
+import hashlib
 import logging
 import os
-import fitz  # PyMuPDF
-import docx  # python-docx
-import nltk
 import re
-import hashlib
-from typing import Dict, List, Tuple, Any, Optional
-import sys
 from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+import nltk
 
 # --- Optional Transformer Import ---
 try:
@@ -28,12 +26,12 @@ except ImportError:
 # --- Preprocessing Utils Import ---
 try:
     from .preprocessing_utils import (
-        basic_clean_text,
         advanced_clean_text,
-        remove_boilerplate,
+        basic_clean_text,
         extract_basic_metadata,
         extract_enhanced_metadata,
         extract_metadata_with_llm,
+        remove_boilerplate,
     )
 
     PREPROCESSING_UTILS_AVAILABLE = True
@@ -165,7 +163,7 @@ def _split_text_recursively(
     left_text = text[:split_point].strip()
     right_text = text[split_point:].strip()
     if not left_text or not right_text:
-        logger.warning(f"Recursive split ineffective.")
+        logger.warning("Recursive split ineffective.")
         return [text]
     return _split_text_recursively(
         left_text, tokenizer, max_length, overlap
@@ -218,6 +216,11 @@ class DataLoader:
         file_filters: List[str],
     ) -> List[Tuple[str, Dict[str, Any]]]:
         """Processes one file using provided parameters."""
+        from config_models import MainConfig
+
+        # M = MainConfig.METADATA_TAGS # No longer needed for direct keying here
+        F = MainConfig.METADATA_INDEX_FIELDS
+
         short_filename = os.path.basename(file_path)
         logger.info(f"Processing START: {short_filename} ({file_path})")
         p = Path(file_path)
@@ -258,16 +261,40 @@ class DataLoader:
             txt = c["text"]
             if not txt.strip():
                 continue
+
+            # CORRECTED: Use conceptual string keys for the meta dictionary
             meta = {
                 "doc_id": doc_id,
-                "source_filepath": resolved,
                 "chunk_index": idx,
                 "chunk_id": f"{doc_id}_{idx}",
-                "contains_table": c.get("metadata", {}).get("contains_table", False),
+                "filename": short_filename,
+                "source_filepath": resolved,  # This was already correct (conceptual key)
+                "contains_table": c.get("metadata", {}).get(
+                    "contains_table", False
+                ),  # This was already correct
+                # Add other conceptual keys if needed, e.g., "last_modified" if available here
             }
+
+            # Dynamically add other metadata fields if available
+            # This part assumes chunk_meta (from self.chunk_text) also uses conceptual keys
+            # The current self.chunk_text only adds "contains_table" to its metadata.
+            # If self.chunk_text were to add more, this loop would pick them up.
+            chunk_meta_from_chunker = c.get("metadata", {})
+            for (
+                conceptual_key_from_config
+            ) in F:  # F is MainConfig.METADATA_INDEX_FIELDS (conceptual keys)
+                if (
+                    conceptual_key_from_config in chunk_meta_from_chunker
+                    and conceptual_key_from_config not in meta
+                ):
+                    meta[conceptual_key_from_config] = chunk_meta_from_chunker[
+                        conceptual_key_from_config
+                    ]
+
             final.append(
                 (resolved, {"text": txt, "text_with_context": txt, "metadata": meta})
             )
+
         return final
 
     # --- Extraction Methods ---

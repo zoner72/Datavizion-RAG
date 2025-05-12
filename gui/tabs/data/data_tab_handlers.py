@@ -5,10 +5,12 @@ import logging
 import shutil
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any  # Import Any
+from typing import TYPE_CHECKING, Any, List  # Import Any
 
 from PyQt6.QtCore import Qt, QTimer, pyqtSlot  # Import pyqtSlot
 from PyQt6.QtWidgets import QMessageBox, QTableWidgetItem
+
+from gui.tabs.data.data_tab import LocalFileScanWorker
 
 from .data_tab_constants import (
     DIALOG_CONFIRM_TITLE,
@@ -379,28 +381,69 @@ class DataTabHandlers:
         table.setItem(row, 3, QTableWidgetItem(str(count)))
         self.save_tracked_websites()
         self.conditional_enabling()
-        # Update Website Indexed column after scrape success
+
+        # ✅ Trigger indexing only if scrape succeeded
         if result_data.get("status") == "success":
             scraped_url = result_data.get("url")
             if scraped_url:
-                # --- 🔧 FIX: Call set_indexed_status_for_url on data_tab ---
                 self.data_tab.set_indexed_status_for_url(scraped_url, is_indexed=True)
-                # --- END FIX ---
                 self.save_tracked_websites()
                 self.run_summary_update()
 
+                # 🔧 FIX: Trigger indexing now
+                self.data_tab.start_refresh_index()
+
         logger.critical("***** handle_scrape_finished COMPLETED *****")
 
-    def handle_dropped_files(self, file_paths: list[str]):
-        logger.info(f"Handling {len(file_paths)} dropped file(s).")
-        if self.data_tab.is_busy():
-            self.data_tab.show_message(
-                "Busy",
-                "Cannot process dropped files: another operation is in progress.",
-                QMessageBox.Icon.Warning,
+    def handle_dropped_files(self, paths: List[str]) -> None:
+        """
+        Handle files or folders dropped into the drop area.
+        Scans and indexes PDFs from dropped files/folders.
+        """
+        if not paths:
+            logger.info("No files dropped.")
+            return
+
+        if self.data_tab.is_worker_running():
+            logger.warning(
+                "A background operation is already in progress. Ignoring dropped files."
+            )
+            self.data_tab.show_warning_dialog(
+                "Busy", "Please wait until the current operation finishes."
             )
             return
-        self.process_local_files(file_paths)
+
+        local_paths = []
+
+        for path in paths:
+            try:
+                path_obj = Path(path)
+                if path_obj.is_dir():
+                    for file_path in path_obj.rglob("*.pdf"):
+                        local_paths.append(str(file_path.resolve()))
+                elif path_obj.is_file() and path_obj.suffix.lower() == ".pdf":
+                    local_paths.append(str(path_obj.resolve()))
+                else:
+                    logger.info(f"Skipped unsupported path: {path}")
+            except Exception as e:
+                logger.error(f"Error processing dropped path '{path}': {e}")
+
+        if not local_paths:
+            self.data_tab.show_warning_dialog(
+                "No PDFs Found", "Only PDF files can be indexed via drag-and-drop."
+            )
+            return
+
+        logger.info(f"[Drop] Found {len(local_paths)} local PDF(s).")
+        self.data_tab.last_operation = "add"
+        self.data_tab.start_background_worker(
+            LocalFileScanWorker,
+            self.config,
+            self.data_tab,
+            source_paths=local_paths,
+            thread_attr="_local_scan_thread",
+            worker_attr="_local_scan_worker",
+        )
 
     def process_local_files(self, file_paths: list[str]):
         if not file_paths:

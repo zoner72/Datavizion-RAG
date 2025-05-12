@@ -7,7 +7,6 @@ respecting robots.txt and configurable concurrency.
 
 import argparse
 import asyncio
-import copy
 import hashlib
 import json
 import logging
@@ -17,14 +16,13 @@ import sys
 import urllib.robotparser
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
+from urllib.parse import urldefrag, urljoin, urlparse
 
 import aiofiles
 import aiohttp
 import chardet
 from bs4 import BeautifulSoup
 from tqdm.asyncio import tqdm_asyncio
-
-from urllib.parse import urljoin, urlparse, urldefrag
 
 # Environment variable for config path
 ENV_CONFIG_PATH_VAR = "KNOWLEDGE_LLM_CONFIG_PATH"
@@ -40,7 +38,9 @@ except Exception:
 
 # Import Pydantic config and loader
 try:
-    from config_models import MainConfig, _load_json_data, ValidationError
+    from pydantic import ValidationError
+
+    from config_models import MainConfig, _load_json_data
 except ImportError as e:
     logger.critical(f"Failed to import config models: {e}")
     sys.exit(1)
@@ -116,28 +116,38 @@ async def fetch_html(
 
 async def extract_links(
     current_url: str, soup: BeautifulSoup
-) -> Tuple[List[str], List[str]]:
-    """Extract crawlable links and PDF URLs from a BeautifulSoup object."""
-    crawlable, pdfs = set(), set()
+) -> Tuple[List[str], List[Dict[str, str]]]:
+    """Extract crawlable links and enriched PDF metadata."""
+    crawlable, pdfs = set(), []
+
     parsed = urlparse(current_url)
     domain_root = ".".join(parsed.netloc.split(".")[-2:])
 
     for tag in soup.find_all("a", href=True):
         href = tag["href"]
+        anchor_text = tag.get_text(strip=True) or None
+
         try:
             abs_url, _ = urldefrag(urljoin(current_url, href))
             p = urlparse(abs_url)
             if p.scheme not in ("http", "https"):
                 continue
+
             lower = abs_url.lower()
             if lower.endswith(".pdf"):
-                pdfs.add(abs_url)
+                pdfs.append(
+                    {
+                        "pdf_url": abs_url,
+                        "source_page": current_url,
+                        "anchor_text": anchor_text,
+                    }
+                )
             elif p.netloc.endswith(domain_root):
                 crawlable.add(abs_url)
         except Exception:
             continue
 
-    return list(crawlable), list(pdfs)
+    return list(crawlable), pdfs
 
 
 async def save_text(
@@ -235,7 +245,9 @@ async def crawl(
         )
         if saved:
             text_files.append(saved)
-        all_pdfs.update(pdfs)
+        all_pdfs.update(
+            pdf.get("url") for pdf in pdfs if isinstance(pdf, dict) and "url" in pdf
+        )
 
     tasks = [
         crawl(u, session, depth + 1, mode, output_dir, all_pdfs, config)
@@ -275,13 +287,28 @@ async def run_scrape(
 
     async with aiohttp.ClientSession() as session:
         if mode == "text":
+            pdf_metadata_list: List[Dict[str, str]] = []
+
+            # Start crawling
             texts, _ = await crawl(
                 start_url, session, 0, "text", output_dir, set(), config
             )
             results["output_paths"] = list(set(texts))
+
+            # Extract PDF metadata from all visited pages
+            for url in visited_urls:
+                html = await fetch_html(session, url, config)
+                if not html:
+                    continue
+                soup = BeautifulSoup(html, "lxml")
+                _, pdfs = await extract_links(url, soup)
+                pdf_metadata_list.extend(pdfs)
+
+            # Save enriched PDF log
             if pdf_log:
                 with open(pdf_log, "w", encoding="utf-8") as f:
-                    json.dump(list(visited_urls), f, indent=2)
+                    json.dump(pdf_metadata_list, f, indent=2)
+
             results.update(
                 {"status": "success", "message": f"Saved {len(texts)} text files."}
             )
@@ -292,7 +319,10 @@ async def run_scrape(
             with open(pdf_log, "r", encoding="utf-8") as f:
                 links = json.load(f)
             paths = await tqdm_asyncio.gather(
-                *(download_pdf(session, u, output_dir, config) for u in links)
+                *(
+                    download_pdf(session, u["pdf_url"], output_dir, config)
+                    for u in links
+                )
             )
             success = [p for p in paths if p]
             results.update(
@@ -302,6 +332,7 @@ async def run_scrape(
                     "message": f"Downloaded {len(success)}/{len(links)} PDFs.",
                 }
             )
+
         else:
             raise ValueError(f"Unknown mode: {mode}")
 

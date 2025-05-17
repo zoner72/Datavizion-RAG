@@ -1,13 +1,12 @@
-# Datavizion
-
-## Version
+Datavizion
+Version 0.2.0
 <!-- VERSION_PLACEHOLDER -->
 
 =========
 
 Overview
 --------
-Datavizion is a beginner-friendly desktop RAG implementation that lets you scrape, index, query, and manage documents with a few clicks. Powered by PyQt6, Qdrant, and your choice of LLM backends, it delivers a smooth, drag-and-drop workflow for turning websites and PDFs into an intelligent knowledge base.
+Datavizion is a beginner‑friendly desktop RAG tool that lets you scrape, index, query, and manage documents with just a few clicks. Built on PyQt6, Qdrant, and your choice of LLM backends, it provides a seamless drag‑and‑drop workflow for turning websites and PDFs into an intelligent, updatable knowledge base.
 
 Key Features
 ------------
@@ -42,6 +41,7 @@ Create a virtual environment & install Python deps
 
 python3 -m venv .venv
 source .venv/bin/activate    # or `.venv\Scripts\activate` on Windows
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
 pip install -r requirements.txt
 Start Qdrant with Docker Compose
 

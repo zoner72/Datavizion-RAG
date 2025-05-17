@@ -1,5 +1,5 @@
 Datavizion
-Version 0.2.0
+Version 0.3.0
 <!-- VERSION_PLACEHOLDER -->
 
 =========
@@ -14,7 +14,7 @@ Key Features
 • **Drag & Drop** support for files and folders (note: doesn’t work inside IDEs—launch from your OS file explorer).  
 • **Website scraper** that downloads text and PDFs, then builds a semantic index.  
 • **Vector database integration** via Docker-powered Qdrant, with advanced quantization options.  
-• **Internal API server** you can turn on/off from the GUI.  
+• **Internal API server** which you can turn on/off from the GUI.  
 • **Real-time log viewer** and health summary to monitor threads, index size, and last operation time.  
 • **Customizable LLM settings** with templates, temperature, and response format.  
 • **Built-in “intense” indexing profile** for deeper, overlapping chunks.  
@@ -34,7 +34,7 @@ Installation (Easy for Beginners)
    https://www.docker.com/get-started  
 2. **Clone this repo**  
    ```bash
-   git clone https://github.com/YourName/MyAppName.git
+   git clone https://github.com/zoner72/Datavizion-RAG
    cd DATAVIZION-RAG
 Create a virtual environment & install Python deps
 

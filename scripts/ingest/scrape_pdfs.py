@@ -1282,5 +1282,5 @@ if __name__ == "__main__":
             event_loop_main.close()
         logger_main_block.info("Asyncio event loop closed from __main__ finally.")
 
-    print(json.dumps(final_result_data_main, indent=2))
+    print(json.dumps(final_result_data_main))
     sys.exit(script_exit_code_main)

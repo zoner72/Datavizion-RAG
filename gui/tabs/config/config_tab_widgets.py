@@ -1,8 +1,11 @@
 # File: gui/tabs/config/config_tab_widgets.py
 
 import logging
+import os
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
-from PyQt6.QtCore import Qt  # Import QSettings
+from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -15,7 +18,7 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QSizePolicy,
     QSpinBox,
-    QTextEdit,  # Import QTextEdit
+    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -24,121 +27,209 @@ from gui.tabs.config.config_tab_constants import (
     CONFIG_API_KEY_PLACEHOLDER,
     CONFIG_BROWSE_BUTTON,
     STYLE_EDITABLE_LINEEDIT,
-    STYLE_READONLY_LINEEDIT,  # Import styles
+    STYLE_READONLY_LINEEDIT,
 )
 
 logger = logging.getLogger(__name__)
-
-# --- Helper functions to add settings to layouts and store widget references ---
 
 
 def add_config_setting(
     config_tab,
     layout,
-    label_text,
-    setting_key,
-    default_value=None,
-    widget_type=None,
-    items=None,
-    min_width=None,
-    max_width=None,
-):
-    # Note: Initial value setting logic removed here.
-    # The load_values_from_config function will handle setting values after widgets are created.
-    label_widget = QLabel(label_text)
-    label_widget.setAlignment(
-        Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+    label_text: Optional[str],
+    setting_key: str,
+    default_value: Any = None,
+    widget_type: Optional[type[QWidget]] = None,
+    items: Optional[List[str] | Dict[str, Any]] = None,
+    min_width: Optional[int] = None,
+    max_width: Optional[int] = None,
+    spinbox_range: Optional[tuple[int, int]] = None,
+    doublespinbox_range: Optional[tuple[float, float]] = None,
+    doublespinbox_decimals: Optional[int] = None,
+    doublespinbox_step: Optional[float] = None,
+) -> Optional[QWidget]:
+    # --- START DETAILED DEBUG ---
+    # Using logger.debug for consistency, but print() is fine for quick debugging too.
+    logger.debug(f"\n--- add_config_setting called for key '{setting_key}' ---")
+    logger.debug(f"  setting_key: {setting_key}")
+    logger.debug(f"  label_text: '{label_text}'")
+    logger.debug(f"  default_value: {default_value} (type: {type(default_value)})")
+    logger.debug(f"  widget_type passed: {widget_type} (id: {id(widget_type)})")
+    logger.debug(f"  items passed: {items}")
+
+    # Log the types we are comparing against for clarity
+    logger.debug(f"  Reference QLineEdit type: {QLineEdit} (id: {id(QLineEdit)})")
+    logger.debug(f"  Reference QComboBox type: {QComboBox} (id: {id(QComboBox)})")
+    logger.debug(f"  Reference QCheckBox type: {QCheckBox} (id: {id(QCheckBox)})")
+    # ... add more for other types if needed for debugging them
+
+    logger.debug(
+        f"  Comparison: widget_type == QLineEdit -> {widget_type == QLineEdit}"
     )
+    logger.debug(
+        f"  Comparison: widget_type == QComboBox -> {widget_type == QComboBox}"
+    )
+    logger.debug(f"  Comparison: items is not None -> {items is not None}")
+    # --- END DETAILED DEBUG ---
 
-    widget = None  # Define widget outside if/elif chain
+    created_widget: Optional[QWidget] = None
+    label_widget_instance: Optional[QLabel] = None
 
-    if widget_type == QComboBox or (items is not None):
-        widget = QComboBox()
+    if label_text:
+        label_widget_instance = QLabel(label_text)
+        label_widget_instance.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+
+    # Determine widget type and create it
+    if widget_type == QComboBox:
+        logger.debug(f"  Branch taken for '{setting_key}': QComboBox")
+        created_widget = QComboBox()
         if items:
-            # Add items and optionally store associated data if needed (e.g., "OpenAI", "openai")
-            # Currently just adds strings.
-            widget.addItems(items)
-    elif widget_type == QCheckBox:  # Explicitly handle QCheckBox type
-        widget = QCheckBox()
-        label_widget = QLabel("")  # For checkbox, omit label for layout
+            if isinstance(items, dict):
+                for display, data_val in items.items():
+                    created_widget.addItem(str(display), userData=data_val)
+            elif (
+                isinstance(items, list)
+                and items
+                and isinstance(items[0], tuple)
+                and len(items[0]) == 2
+            ):
+                for display, data_val in items:
+                    created_widget.addItem(str(display), userData=data_val)
+            elif isinstance(items, list):
+                created_widget.addItems([str(item) for item in items])
+            else:
+                logger.warning(f"Invalid 'items' format for QComboBox '{setting_key}'.")
+    elif widget_type == QCheckBox:
+        logger.debug(f"  Branch taken for '{setting_key}': QCheckBox")
+        created_widget = QCheckBox(label_text if label_text else "")
+        if isinstance(default_value, bool):
+            created_widget.setChecked(default_value)
+        label_widget_instance = None
     elif widget_type == QDoubleSpinBox:
-        widget = QDoubleSpinBox()
-        widget.setRange(-9999.0, 9999.0)  # Allow negative if needed, or adjust range
-        widget.setSingleStep(0.1)
-        widget.setDecimals(2)
+        logger.debug(f"  Branch taken for '{setting_key}': QDoubleSpinBox")
+        created_widget = QDoubleSpinBox()
+        if doublespinbox_range:
+            created_widget.setRange(doublespinbox_range[0], doublespinbox_range[1])
+        else:
+            created_widget.setRange(-99999.0, 99999.0)
+        if doublespinbox_step:
+            created_widget.setSingleStep(doublespinbox_step)
+        else:
+            created_widget.setSingleStep(0.1)
+        if doublespinbox_decimals:
+            created_widget.setDecimals(doublespinbox_decimals)
+        else:
+            created_widget.setDecimals(2)
+        if isinstance(default_value, (float, int)):
+            created_widget.setValue(float(default_value))
     elif widget_type == QSpinBox:
-        widget = QSpinBox()
-        widget.setRange(0, 999999)  # Wider range for things like port, chunk size
-        widget.setSingleStep(1)
-    elif widget_type == QTextEdit:  # Add handling for QTextEdit
-        widget = QTextEdit()
-    elif widget_type == QLineEdit:  # Explicitly handle QLineEdit type
-        widget = QLineEdit()
-    # Fallback based on default_value type if widget_type is not specified
-    elif isinstance(default_value, bool):
-        widget = QCheckBox()
-        label_widget = QLabel("")
-    elif isinstance(default_value, float):
-        widget = QDoubleSpinBox()
-        widget.setRange(-9999.0, 9999.0)
-        widget.setSingleStep(0.1)
-        widget.setDecimals(2)
-    elif isinstance(default_value, int):
-        widget = QSpinBox()
-        widget.setRange(0, 999999)
-        widget.setSingleStep(1)
-    else:  # Default to QLineEdit if type is unknown or string
-        widget = QLineEdit()
+        logger.debug(f"  Branch taken for '{setting_key}': QSpinBox")
+        created_widget = QSpinBox()
+        if spinbox_range:
+            created_widget.setRange(spinbox_range[0], spinbox_range[1])
+        else:
+            created_widget.setRange(0, 9999999)
+        created_widget.setSingleStep(1)
+        if isinstance(default_value, int):
+            created_widget.setValue(default_value)
+    elif widget_type == QTextEdit:
+        logger.debug(f"  Branch taken for '{setting_key}': QTextEdit")
+        created_widget = QTextEdit(
+            str(default_value) if default_value is not None else ""
+        )
+    elif widget_type == QLineEdit:
+        logger.debug(f"  Branch taken for '{setting_key}': QLineEdit")
+        created_widget = QLineEdit(
+            str(default_value) if default_value is not None else ""
+        )
+        logger.debug(
+            f"  QLineEdit created for '{setting_key}', type is {type(created_widget)}"
+        )
+    elif widget_type is None:
+        logger.debug(
+            f"  Branch taken for '{setting_key}': widget_type is None (fallback by default_value type)"
+        )
+        if isinstance(default_value, bool):
+            created_widget = QCheckBox(label_text if label_text else "")
+            if isinstance(default_value, bool):
+                created_widget.setChecked(default_value)
+            label_widget_instance = None
+        elif isinstance(default_value, float):
+            created_widget = QDoubleSpinBox()
+            created_widget.setRange(-99999.0, 99999.0)
+            created_widget.setSingleStep(0.1)
+            created_widget.setDecimals(2)
+            created_widget.setValue(default_value)
+        elif isinstance(default_value, int):
+            created_widget = QSpinBox()
+            created_widget.setRange(0, 9999999)
+            created_widget.setSingleStep(1)
+            created_widget.setValue(default_value)
+        else:
+            created_widget = QLineEdit(
+                str(default_value) if default_value is not None else ""
+            )
+    else:
+        logger.error(
+            f"  Branch taken for '{setting_key}': Unhandled explicit widget_type '{widget_type.__name__ if widget_type else 'NoneType specified'}'. Widget not created."
+        )
+        # created_widget remains None
 
-    # Set widget-specific properties
-    if widget:
+    if created_widget:
+        logger.debug(
+            f"  Post-creation for '{setting_key}': Widget IS created. Type: {type(created_widget)}"
+        )
         if min_width:
-            widget.setMinimumWidth(min_width)
+            created_widget.setMinimumWidth(min_width)
         if max_width:
-            widget.setMaximumWidth(max_width)
+            created_widget.setMaximumWidth(max_width)
 
-        if isinstance(widget, QLineEdit):
-            widget.setSizePolicy(
+        if isinstance(created_widget, QLineEdit):
+            created_widget.setSizePolicy(
                 QSizePolicy.Policy.MinimumExpanding, QSizePolicy.Policy.Fixed
             )
-        elif isinstance(widget, (QSpinBox, QDoubleSpinBox, QComboBox)):
-            widget.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-        elif isinstance(widget, QTextEdit):
-            widget.setSizePolicy(
+        elif isinstance(created_widget, (QSpinBox, QDoubleSpinBox, QComboBox)):
+            created_widget.setSizePolicy(
+                QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed
+            )
+        elif isinstance(created_widget, QTextEdit):
+            created_widget.setSizePolicy(
                 QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
             )
 
-        config_tab.settings_widgets[setting_key] = widget  # Store widget reference
+        config_tab.settings_widgets[setting_key] = created_widget
 
-        # Add to layout
         if isinstance(layout, QFormLayout):
-            # Checkbox handling in QFormLayout needs special attention if label is empty
-            if isinstance(widget, QCheckBox):
-                layout.addRow(widget)  # Add checkbox directly across both columns
+            if label_widget_instance:
+                layout.addRow(label_widget_instance, created_widget)
             else:
-                layout.addRow(label_widget, widget)
+                layout.addRow(created_widget)
         elif isinstance(layout, (QVBoxLayout, QHBoxLayout)):
-            # For V/H layouts, add label and widget in a sub-layout
-            row_layout = QHBoxLayout()
-            # If it's a checkbox without a label, just add the widget
-            if isinstance(widget, QCheckBox) and label_text == "":
-                row_layout.addWidget(widget)
-                row_layout.addStretch(1)  # Fill space
-            else:
-                row_layout.addWidget(label_widget)
-                row_layout.addWidget(widget)
-            layout.addLayout(row_layout)
+            if label_widget_instance:
+                layout.addWidget(label_widget_instance)
+            layout.addWidget(created_widget)
         else:
-            # Fallback for other layout types (less common in forms)
-            layout.addWidget(label_widget)
-            layout.addWidget(widget)
+            logger.warning(
+                f"Unsupported layout type '{type(layout)}' for add_config_setting. Widget '{setting_key}' may not be added correctly."
+            )
+            if label_widget_instance:
+                layout.addWidget(label_widget_instance)
+            layout.addWidget(created_widget)
 
+        logger.debug(
+            f"--- add_config_setting returning for key '{setting_key}': Widget type {type(created_widget)}, Widget: {created_widget} ---"
+        )
+        return created_widget
     else:
         logger.error(
-            f"Failed to create widget for setting '{setting_key}' (type={widget_type}, default={default_value})"
+            f"  Post-creation for '{setting_key}': Widget IS None. Returning None."
         )
-
-    return widget
+        logger.debug(
+            f"--- add_config_setting returning for key '{setting_key}': None ---"
+        )
+        return None
 
 
 def add_config_setting_with_browse(
@@ -149,114 +240,140 @@ def add_config_setting_with_browse(
     default_value=None,
     dialog_title="Select File",
     directory=True,
-):
-    # Note: Initial value setting logic removed here.
-    label_widget = QLabel(label_text)
-    line_edit = QLineEdit()
-    browse_button = QPushButton(CONFIG_BROWSE_BUTTON)
+) -> Optional[QLineEdit]:  # Return Optional[QLineEdit] to be accurate
+    # --- START DETAILED DEBUG ---
+    logger.debug(
+        f"\n--- add_config_setting_with_browse called for key '{setting_key}' ---"
+    )
+    logger.debug(f"  label_text: '{label_text}', default_value: '{default_value}'")
+    logger.debug(f"  dialog_title: '{dialog_title}', directory: {directory}")
+    # --- END DETAILED DEBUG ---
 
-    def browse_clicked():
-        # Use the path from the line edit as the starting directory if it's valid
-        current_path = line_edit.text()
-        if directory:
-            path = QFileDialog.getExistingDirectory(
-                config_tab, dialog_title, current_path
+    created_line_edit: Optional[QLineEdit] = None  # Initialize
+
+    try:
+        label_widget_instance = QLabel(label_text)  # Renamed for clarity
+        created_line_edit = QLineEdit(
+            str(default_value) if default_value is not None else ""
+        )
+        logger.debug(
+            f"  For '{setting_key}', line_edit created: {type(created_line_edit)}, {created_line_edit}"
+        )
+
+        browse_button = QPushButton(CONFIG_BROWSE_BUTTON)
+        logger.debug(
+            f"  For '{setting_key}', browse_button created: {type(browse_button)}"
+        )
+
+        # Define browse_clicked within the scope where line_edit is accessible
+        def browse_clicked():
+            current_path = created_line_edit.text()  # Use created_line_edit
+            start_dir = (
+                current_path if os.path.isdir(current_path) else str(Path.home())
             )
+            if directory:
+                path = QFileDialog.getExistingDirectory(
+                    config_tab, dialog_title, start_dir
+                )
+            else:
+                path, _ = QFileDialog.getOpenFileName(
+                    config_tab, dialog_title, start_dir
+                )
+            if path:
+                created_line_edit.setText(path)  # Use created_line_edit
+
+        browse_button.clicked.connect(browse_clicked)
+
+        config_tab.settings_widgets[setting_key] = created_line_edit
+
+        path_layout_widget = QWidget()
+        path_layout = QHBoxLayout(path_layout_widget)
+        path_layout.setContentsMargins(0, 0, 0, 0)
+        path_layout.addWidget(created_line_edit)  # Add the created_line_edit
+        path_layout.addWidget(browse_button)
+
+        if isinstance(layout, QFormLayout):
+            layout.addRow(label_widget_instance, path_layout_widget)
+        elif isinstance(layout, (QVBoxLayout, QHBoxLayout)):
+            row_layout = QHBoxLayout()
+            if label_widget_instance:
+                row_layout.addWidget(label_widget_instance)  # Check if label exists
+            row_layout.addWidget(path_layout_widget)
+            layout.addLayout(row_layout)
         else:
-            path, _ = QFileDialog.getOpenFileName(
-                config_tab, dialog_title, current_path
+            logger.warning(
+                f"add_config_setting_with_browse used with non-QFormLayout/VBox/HBox: {type(layout)}"
             )
+            if label_widget_instance:
+                layout.addWidget(label_widget_instance)
+            layout.addWidget(path_layout_widget)
 
-        if path:
-            line_edit.setText(path)
+        logger.debug(
+            f"--- add_config_setting_with_browse returning for key '{setting_key}': {type(created_line_edit)}, {created_line_edit} ---"
+        )
+        return created_line_edit  # Return the QLineEdit instance
 
-    browse_button.clicked.connect(browse_clicked)
-
-    config_tab.settings_widgets[setting_key] = line_edit  # Store line edit
-    # config_tab.ui_widgets[f"{setting_key}_browse_btn"] = browse_button # Optionally store button
-
-    path_layout = QHBoxLayout()
-    path_layout.addWidget(line_edit)
-    path_layout.addWidget(browse_button)
-
-    # Use QWidget to wrap the layout for QFormLayout
-    path_widget_wrapper = QWidget()
-    path_widget_wrapper.setLayout(path_layout)
-
-    if isinstance(layout, QFormLayout):
-        layout.addRow(label_widget, path_widget_wrapper)
-    elif isinstance(layout, (QVBoxLayout, QHBoxLayout)):
-        row_layout = QHBoxLayout()
-        row_layout.addWidget(label_widget)
-        row_layout.addLayout(path_layout)
-        layout.addLayout(row_layout)
-    else:
-        layout.addWidget(label_widget)
-        layout.addWidget(path_widget_wrapper)  # Add the wrapper widget
-
-    return line_edit  # Return the line edit widget
+    except Exception as e_browse:
+        logger.error(
+            f"CRITICAL ERROR INSIDE add_config_setting_with_browse for key '{setting_key}': {e_browse}",
+            exc_info=True,
+        )
+        return None  # Explicitly return None if an exception occurs during creation
 
 
-# Modified to use a consistent key and store label/field references
-def _add_openai_api_key_setting(config_tab, layout):
+def _add_openai_api_key_setting(config_tab, layout: QFormLayout):  # Expect QFormLayout
     label = QLabel("OpenAI API Key:")
+    label.setToolTip(  # Tooltip for the label
+        "Your secret API key from OpenAI. Required if using OpenAI models."
+    )
+    config_tab.ui_widgets["openai_api_key_label"] = label
+
     field = QLineEdit()
     field.setEchoMode(QLineEdit.EchoMode.Password)
     field.setPlaceholderText(CONFIG_API_KEY_PLACEHOLDER)
     field.setClearButtonEnabled(True)
+    field.setToolTip(  # Tooltip for the input field
+        "Enter your OpenAI API key here. It will be stored securely.\n"
+        "Visible only when 'openai' is selected as the LLM Provider."
+    )
+    # Use a consistent key that does not clash with config model keys if it's purely UI state
+    config_tab.settings_widgets["openai_api_key_field"] = (
+        field  # Or a more specific UI key if not directly mapped
+    )
 
-    # *** IMPORTANT ***: Use a consistent, non-config-path key for this widget
-    widget_key = "openai_api_key_field"
-    label_key = "openai_api_key_label"
-
-    # Store widget references in config_tab's dictionaries
-    config_tab.settings_widgets[widget_key] = field
-    config_tab.ui_widgets[label_key] = label  # Store the label reference too
-
-    # Store as attributes on the config_tab instance for easier access in toggle_api_key_visibility
+    # Store as direct attributes for easier access in toggle_api_key_visibility
+    # This is fine, but ensure consistency if you also use settings_widgets/ui_widgets
     config_tab.api_label = label
     config_tab.api_field = field
 
-    if isinstance(layout, QFormLayout):
-        layout.addRow(label, field)
-    else:
-        # Assuming you might use this in other layouts
-        row = QHBoxLayout()
-        row.addWidget(label)
-        row.addWidget(field)
-        layout.addLayout(row)
+    layout.addRow(label, field)
 
-    # Initial state: Hidden by default, toggle_api_key_visibility will show if provider is openai
-    label.setVisible(False)
-    field.setVisible(False)
+    label.setVisible(False)  # Initial state
+    field.setVisible(False)  # Initial state
 
-    return field
+    return field  # Return the QLineEdit widget
 
 
-def _wrap_checkbox(config_tab, setting_key, text, layout):
-    # Note: Initial value setting logic removed here.
+def _wrap_checkbox(
+    config_tab, setting_key, text, layout
+) -> QCheckBox:  # Return QCheckBox
     checkbox = QCheckBox(text)
-    config_tab.settings_widgets[setting_key] = checkbox  # Store widget reference
+    config_tab.settings_widgets[setting_key] = checkbox
 
-    # Add to layout
     if isinstance(layout, QFormLayout):
-        layout.addRow(checkbox)  # Checkboxes in QFormLayout typically span both columns
+        layout.addRow(checkbox)
     else:
-        layout.addWidget(checkbox)  # Simple add for other layouts
+        layout.addWidget(checkbox)
 
-    return checkbox
+    return checkbox  # <<< RETURN THE QCHECKBOX
 
 
 def toggle_embedding_edit_widgets(config_tab, enable: bool):
-    """Helper function to enable/disable embedding model QLineEdit widgets."""
     style = STYLE_EDITABLE_LINEEDIT if enable else STYLE_READONLY_LINEEDIT
     for key in ["embedding_model_index", "embedding_model_query"]:
         widget = config_tab.settings_widgets.get(key)
         if isinstance(widget, QLineEdit):
             widget.setReadOnly(not enable)
-            widget.setStyleSheet(style)
-            # Optionally change background color or style further based on enable state
-            if enable:
-                widget.setStyleSheet("")  # Clear readonly style
-            else:
-                widget.setStyleSheet(STYLE_READONLY_LINEEDIT)
+            # Use setStyleSheet("") to clear previous styles if 'enable' is true,
+            # otherwise apply the readonly style.
+            widget.setStyleSheet(style if not enable else "")

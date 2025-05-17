@@ -252,6 +252,10 @@ class MainConfig(BaseModel):
         default="BAAI/bge-m3",
         description="Model ID for index embeddings (Hugging Face or local path).",
     )
+    vector_size: Optional[int] = Field(  # Make it optional initially
+        default=None,  # Or a common default like 768 if you prefer
+        description="Dimension of the embedding vectors. Should be set based on the chosen embedding_model_index. If None, will attempt to infer from model.",
+    )
     embedding_model_query: Optional[str] = Field(
         default=None,
         description="Model ID for query embeddings; defaults to index model.",
@@ -374,19 +378,12 @@ class MainConfig(BaseModel):
     )
 
     # --- Scraping ---
-    # NOTE: The field 'scraping_timeout' from your original MainConfig is now split into:
-    # 'scraping_individual_request_timeout_s' and 'scraping_global_timeout_s'.
-    # Ensure your config.json reflects these new names.
-    scraping_max_depth: int = Field(
-        default=3,  # Changed from original 2 for a slightly deeper default
-        description="Max link depth for web crawler.",
-    )
     scraping_user_agent: str = Field(
         default="Mozilla/5.0 (compatible; KnowledgeLLMBot/1.0; +https://example.com/bot-info)",
         description="User-Agent for web scraping.",
     )
     scraping_max_concurrent: int = Field(
-        default=8,  # Your config.json had 10. Using model's default.
+        default=20,  # Your config.json had 10. Using model's default.
         description="Max concurrent requests during scraping.",
     )
     # THIS FIELD REPLACES THE OLD 'scraping_timeout' for individual requests

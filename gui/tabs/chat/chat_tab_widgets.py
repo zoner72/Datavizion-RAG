@@ -2,16 +2,19 @@
 
 from PyQt6.QtWidgets import QTextEdit, QPushButton
 
+
 def create_query_input(tab):
     input_box = QTextEdit()
     input_box.setPlaceholderText("Type your query here...")
     input_box.setFixedHeight(80)
     return input_box
 
+
 def create_ask_button(tab):
     button = QPushButton("Ask")
     button.setToolTip("Submit the query")
     return button
+
 
 def create_conversation_display(tab):
     display = QTextEdit()
@@ -20,17 +23,20 @@ def create_conversation_display(tab):
     display.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
     return display
 
+
 def create_correction_input(tab):
     input_box = QTextEdit()
     input_box.setPlaceholderText("Enter correction here...")
     input_box.setFixedHeight(60)
     return input_box
 
+
 def create_submit_correction_button(tab):
     button = QPushButton("Submit Correction")
     button.setToolTip("Submit corrected answer")
     button.setEnabled(False)
     return button
+
 
 def create_new_chat_button(tab):
     button = QPushButton("New Chat")

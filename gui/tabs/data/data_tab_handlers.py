@@ -1,57 +1,68 @@
-import logging
-from pathlib import Path
+# In gui/tabs/data/data_tab_handlers.py
 
-import time
 import json
+import logging
 import shutil
+import time
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, List  # Import Any
+
+from PyQt6.QtCore import Qt, QTimer, pyqtSlot  # Import pyqtSlot
 from PyQt6.QtWidgets import QMessageBox, QTableWidgetItem
-from PyQt6.QtCore import Qt, QTimer
+
+from gui.tabs.data.data_tab import LocalFileScanWorker
+
 from .data_tab_constants import (
-    DIALOG_WARNING_TITLE, DIALOG_CONFIRM_TITLE, DIALOG_INFO_TITLE,
-    DIALOG_ERROR_TITLE, DIALOG_SELECT_DOC_TITLE, DIALOG_SELECT_DOC_FILTER,
-    DIALOG_ERROR_FILE_COPY, DIALOG_INFO_WEBSITE_CONFIG_DELETED
+    DIALOG_CONFIRM_TITLE,
+    DIALOG_ERROR_FILE_COPY,
+    DIALOG_ERROR_TITLE,
+    DIALOG_INFO_TITLE,
+    DIALOG_INFO_WEBSITE_CONFIG_DELETED,
+    DIALOG_SELECT_DOC_FILTER,
+    DIALOG_SELECT_DOC_TITLE,
+    DIALOG_WARNING_TITLE,
 )
-from .data_tab import (LocalFileScanWorker, IndexStatsWorker
-)
-from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from .data_tab import DataTab
     from config_models import MainConfig
+
+    from .data_tab import DataTab
 
 logger = logging.getLogger(__name__)
 
+
 class DataTabHandlers:
-    def __init__(self, data_tab: 'DataTab', config: 'MainConfig'):
+    def __init__(self, data_tab: "DataTab", config: "MainConfig"):
+        super().__init__()
         self.data_tab = data_tab
         self.config = config
-        self._local_scan_worker = None
-        self._local_scan_thread = None
-        self._stats_worker = None
-        self._stats_thread = None
 
     def wire_signals(self):
-        self.data_tab.scrape_website_button.clicked.connect(self.data_tab.start_scrape_website)
-        self.data_tab.delete_config_button.clicked.connect(self.delete_website_config_action)
-        self.data_tab.cancel_pipeline_button.clicked.connect(self.data_tab.cancel_current_operation)
-
-        self.data_tab.add_document_button.clicked.connect(self.add_local_documents_action)
-        self.data_tab.import_log_button.clicked.connect(self.data_tab.start_import_log_download)
-
-        self.data_tab.refresh_index_button.clicked.connect(self.data_tab.start_refresh_index)
-        self.data_tab.rebuild_index_button.clicked.connect(self.rebuild_index_action)
-
-        self.data_tab.url_input.textChanged.connect(self.conditional_enabling)
-        self.data_tab.scraped_websites_table.itemSelectionChanged.connect(self.conditional_enabling)
+        """Connect UI signals to handler methods."""
+        dt = self.data_tab
+        dt.scrape_website_button.clicked.connect(dt.start_scrape_website)
+        dt.delete_config_button.clicked.connect(self.delete_website_config_action)
+        dt.cancel_pipeline_button.clicked.connect(dt.cancel_current_operation)
+        dt.add_document_button.clicked.connect(self.add_local_documents_action)
+        dt.import_log_button.clicked.connect(dt.start_import_log_download)
+        dt.refresh_index_button.clicked.connect(dt.start_refresh_index)
+        dt.rebuild_index_button.clicked.connect(self.rebuild_index_action)
+        dt.url_input.textChanged.connect(self.conditional_enabling)
+        dt.scraped_websites_table.itemSelectionChanged.connect(
+            self.conditional_enabling
+        )
 
     def delete_website_config_action(self):
         logging.info("Delete website config action triggered.")
+
         def _do_delete():
             url = self.data_tab.get_selected_url()
             if not url:
-                self.data_tab.show_message(DIALOG_WARNING_TITLE,
+                self.data_tab.show_message(
+                    DIALOG_WARNING_TITLE,
                     "No website selected in the table to delete.",
-                    QMessageBox.Icon.Warning)
+                    QMessageBox.Icon.Warning,
+                )
                 return
             items = self.data_tab.scraped_websites_table.selectedItems()
             if not items:
@@ -69,43 +80,55 @@ class DataTabHandlers:
             self.save_tracked_websites()
             self.conditional_enabling()
             info_msg = DIALOG_INFO_WEBSITE_CONFIG_DELETED.format(url=url)
-            self.data_tab.show_message(DIALOG_INFO_TITLE, info_msg, QMessageBox.Icon.Information)
+            self.data_tab.show_message(
+                DIALOG_INFO_TITLE, info_msg, QMessageBox.Icon.Information
+            )
+
         QTimer.singleShot(0, _do_delete)
 
     def add_pdfs_action(self):
         logger.warning("add_pdfs_action called - review if needed.")
-        self.data_tab.show_message("Not Implemented",
+        self.data_tab.show_message(
+            "Not Implemented",
             "Use 'Add Local Document(s)' or download via website.",
-            QMessageBox.Icon.Information)
+            QMessageBox.Icon.Information,
+        )
 
     def add_local_documents_action(self):
-        logging.info("Add local documents action triggered.")
+        logger.info("Add local documents action triggered.")
+
         def _do_start():
-            if self.data_tab.is_busy():
-                self.data_tab.show_message("Busy",
+            dt = self.data_tab
+            if dt.is_busy():
+                dt.show_message(
+                    DIALOG_WARNING_TITLE,
                     "Cannot add documents: Another operation is in progress.",
-                    QMessageBox.Icon.Warning)
+                    QMessageBox.Icon.Warning,
+                )
                 return
+
             data_dir = Path(self.config.data_directory)
             try:
                 data_dir.mkdir(parents=True, exist_ok=True)
             except OSError as e:
-                logging.error(f"Create/access dir failed '{data_dir}': {e}")
-                self.data_tab.show_message(DIALOG_ERROR_TITLE,
+                logger.error(f"Create/access dir failed '{data_dir}': {e}")
+                dt.show_message(
+                    DIALOG_ERROR_TITLE,
                     f"Cannot access/create data dir:\n{data_dir}\n{e}",
-                    QMessageBox.Icon.Critical)
+                    QMessageBox.Icon.Critical,
+                )
                 return
 
-            file_paths = self.data_tab.open_file_dialog(
+            file_paths = dt.open_file_dialog(
                 title=DIALOG_SELECT_DOC_TITLE,
                 directory=str(data_dir),
-                file_filter=DIALOG_SELECT_DOC_FILTER
+                file_filter=DIALOG_SELECT_DOC_FILTER,
             )
             if not file_paths:
-                logging.info("User cancelled document selection.")
+                logger.info("User cancelled document selection.")
                 return
 
-            copied, copied_names, skipped, errors = [], [], [], []
+            copied, new_files, skipped, errors = [], [], [], []
             for fp in file_paths:
                 src = Path(fp)
                 dest = data_dir / src.name
@@ -119,59 +142,69 @@ class DataTabHandlers:
                     else:
                         shutil.copy2(src, dest)
                         copied.append(str(dest))
-                        copied_names.append(src.name)
+                        new_files.append(src.name)
                 except Exception as e:
                     errors.append(f"{src.name}: {e}")
-                    msg = DIALOG_ERROR_FILE_COPY.format(filename=src.name, e=e)
-                    logging.error(f"Error copying '{src.name}': {e}", exc_info=True)
-                    self.data_tab.show_message(DIALOG_ERROR_TITLE, msg, QMessageBox.Icon.Critical)
+                    logger.error(f"Error copying '{src.name}': {e}", exc_info=True)
+                    dt.show_message(
+                        DIALOG_ERROR_TITLE,
+                        DIALOG_ERROR_FILE_COPY.format(filename=src.name, e=e),
+                        QMessageBox.Icon.Critical,
+                    )
 
             self.run_summary_update()
 
             if skipped:
-                self.data_tab.show_message(DIALOG_WARNING_TITLE,
+                dt.show_message(
+                    DIALOG_WARNING_TITLE,
                     "Skipped existing file(s):\n" + "\n".join(skipped),
-                    QMessageBox.Icon.Warning)
+                    QMessageBox.Icon.Warning,
+                )
             if errors:
-                self.data_tab.show_message(DIALOG_ERROR_TITLE,
+                dt.show_message(
+                    DIALOG_ERROR_TITLE,
                     "Errors copying:\n" + "\n".join(errors),
-                    QMessageBox.Icon.Critical)
+                    QMessageBox.Icon.Critical,
+                )
 
             if copied:
-                if copied_names:
-                    info = f"Copied {len(copied_names)} new file(s) to the data directory."
+                prompt = f"{len(copied)} document(s) are ready in the data directory.\nIndex now?"
+                if dt.prompt_confirm(DIALOG_CONFIRM_TITLE, prompt):
+                    logger.info(f"Starting indexing for {len(copied)} local documents.")
+                    dt.start_index_operation(mode="add", file_paths=copied)
                 else:
-                    info = "No new files copied; indexing existing files."
-                should_index = self.data_tab.prompt_confirm(
-                    "Index New Documents?",
-                    f"{len(copied)} document(s) are ready in the data directory.\nIndex now?"
-                )
-                if should_index:
-                    logging.info(f"Starting indexing for {len(copied)} local documents.")
-                    self.data_tab.start_index_operation(mode='add', file_paths=copied)
-                else:
-                    self.data_tab.show_message(DIALOG_INFO_TITLE,
+                    dt.show_message(
+                        DIALOG_INFO_TITLE,
                         "Indexing skipped. Use 'Refresh Index' later if needed.",
-                        QMessageBox.Icon.Information)
+                        QMessageBox.Icon.Information,
+                    )
 
             self.conditional_enabling()
+
         QTimer.singleShot(0, _do_start)
 
     def rebuild_index_action(self):
         def _do_start():
-            if self.data_tab.is_busy():
-                self.data_tab.show_message("Busy",
+            dt = self.data_tab
+            if dt.is_busy():
+                dt.show_message(
+                    DIALOG_WARNING_TITLE,
                     "Cannot rebuild index: Another primary operation is in progress.",
-                    QMessageBox.Icon.Warning)
+                    QMessageBox.Icon.Warning,
+                )
                 return
-            if not self.data_tab.prompt_confirm(
+
+            confirm = dt.prompt_confirm(
                 DIALOG_CONFIRM_TITLE,
                 "ERASE existing index and rebuild from ALL files in data directory?\n\n"
-                "This cannot be undone.\nProceed?"
-            ):
+                "This cannot be undone.\nProceed?",
+            )
+            if not confirm:
                 return
-            logging.info("Starting index 'rebuild' operation.")
-            self.data_tab.start_index_operation(mode="rebuild")
+
+            logger.info("Starting index 'rebuild' operation.")
+            dt.start_index_operation(mode="rebuild")
+
         QTimer.singleShot(0, _do_start)
 
     def handle_pdf_download_finished(self, result: dict, source_url: str | None):
@@ -180,95 +213,89 @@ class DataTabHandlers:
         skipped = result.get("skipped", 0)
         failed = result.get("failed", 0)
         output_paths = result.get("output_paths", [])
+
         msg = (
             f"PDF Download Complete:\n"
             f"- Downloaded: {downloaded}\n"
-            f"- Skipped (existing): {skipped}\n"
+            f"- Skipped: {skipped}\n"
             f"- Failed: {failed}\n"
         )
         if downloaded:
-            msg += f"\n\nConsider indexing the {downloaded} newly downloaded file(s)."
-            QTimer.singleShot(100, lambda: self.prompt_index_downloaded(output_paths, source_url))
-        self.data_tab.show_message("PDF Download Status", msg, QMessageBox.Icon.Information)
+            msg += f"\nConsider indexing the {downloaded} newly downloaded file(s)."
+            QTimer.singleShot(
+                100, lambda: self.prompt_index_downloaded(output_paths, source_url)
+            )
+
+        self.data_tab.show_message(DIALOG_INFO_TITLE, msg, QMessageBox.Icon.Information)
         self.conditional_enabling()
-        
 
     def prompt_index_downloaded(self, file_paths: list[str], source_url: str | None):
-        if not file_paths:
-            return
-        if self.data_tab.prompt_confirm(
-            "Index Downloaded PDFs?",
-            f"Do you want to index the {len(file_paths)} PDF(s) just downloaded from {source_url}?"
+        if file_paths and self.data_tab.prompt_confirm(
+            DIALOG_CONFIRM_TITLE,
+            f"Index {len(file_paths)} downloaded PDFs from {source_url}?",
         ):
-            self.data_tab.start_index_operation(mode="add", file_paths=file_paths, url_for_status=source_url)
+            self.data_tab.start_index_operation(
+                mode="add", file_paths=file_paths, url_for_status=source_url
+            )
 
     def conditional_enabling(self):
-        busy = self.data_tab.is_busy()
-        logging.info("DataTabHandlers: conditional_enabling entered. Background workers idle.")
-        try:
-            has_selection = bool(self.data_tab.scraped_websites_table.selectedItems())
-            can_scrape = bool(self.data_tab.url_input.text().strip())
-            def set_en(name, val):
-                w = getattr(self.data_tab, name, None)
-                if w: w.setEnabled(val)
-                else: logger.warning(f"conditional_enabling: Widget '{name}' not found.")
-            set_en('scrape_website_button', not busy and can_scrape)
-            set_en('refresh_index_button', not busy)
-            set_en('rebuild_index_button', not busy)
-            set_en('add_document_button', not busy)
-            set_en('import_log_button', not busy and has_selection)
-            set_en('delete_config_button', not busy and has_selection)
-            set_en('cancel_pipeline_button', busy)
-        except Exception as e:
-            logger.error(f"Error in conditional_enabling: {e}", exc_info=True)
+        dt = self.data_tab
+        busy = dt.is_busy()
+        localscan = dt._active_threads.get("local_file_scan")
+        stats = dt._active_threads.get("index_stats")
+        is_local = bool(localscan and localscan.isRunning())
+        is_stats = bool(stats and stats.isRunning())
+
+        logger.info(
+            f"conditional_enabling: busy={busy}, local_scan={is_local}, stats={is_stats}"
+        )
+
+        has_sel = bool(dt.scraped_websites_table.selectedItems())
+        can_scrape = bool(dt.url_input.text().strip())
+
+        def set_enabled(name, value):
+            widget = getattr(dt, name, None)
+            if widget:
+                widget.setEnabled(value)
+
+        set_enabled("scrape_website_button", not busy and can_scrape)
+        set_enabled("refresh_index_button", not busy)
+        set_enabled("rebuild_index_button", not busy)
+        set_enabled("add_document_button", not busy)
+        set_enabled("import_log_button", not busy and has_sel)
+        set_enabled("delete_config_button", not busy and has_sel)
+        set_enabled("cancel_pipeline_button", busy)
 
     def run_summary_update(self):
-        if self.data_tab.is_busy():
-            logger.info("Skipping summary update: primary task running.")
+        dt = self.data_tab
+        if dt.is_busy():
+            logger.info("Skipping summary update; busy.")
             return
+
         now = time.time()
-        if now - self.data_tab._stats_last_run_time < 5:
-            logger.debug("Summary update skipped due to cooldown.")
+        if hasattr(dt, "_stats_last_run_time") and now - dt._stats_last_run_time < 5:
             return
-        self.data_tab._stats_last_run_time = now
-        logger.info("Running health summary update...")
+        dt._stats_last_run_time = now
 
-        if not (self._local_scan_thread and self._local_scan_thread.isRunning()):
-            logger.debug("Starting LocalFileScanWorker.")
-            self._local_scan_worker, self._local_scan_thread = self.data_tab.start_background_worker(
-                LocalFileScanWorker, thread_attr="_local_scan_thread")
-            if self._local_scan_worker:
-                self._local_scan_worker.finished.connect(self.data_tab.update_local_file_count)
-                self._local_scan_worker.error.connect(
-                    lambda msg: self.data_tab.health_local_files_label.setText("Local Files Scanned: Error"))
-            else:
-                logger.error("Failed to start LocalFileScanWorker.")
+        logger.info("Running health summary update.")
+        if getattr(dt, "_is_initial_scan_finished", False):
+            scan_thread = dt._active_threads.get("local_file_scan")
+            if not (scan_thread and scan_thread.isRunning()):
+                dt.start_local_file_scan()
 
-        if not (self._stats_thread and self._stats_thread.isRunning()):
-            logger.debug("Starting IndexStatsWorker.")
-            self._stats_worker, self._stats_thread = self.data_tab.start_background_worker(
-                IndexStatsWorker, thread_attr="_index_stats_thread")
-            if self._stats_worker:
-                def handle_stats(count, label, ts):
-                    local_txt = self.data_tab.health_local_files_label.text()
-                    local_val = None
-                    try:
-                        num = local_txt.split(":")[-1].strip()
-                        if num.isdigit(): local_val = int(num)
-                    except: pass
-                    self.data_tab.update_health_summary(label, count, local_val, ts)
-                self._stats_worker.finished.connect(handle_stats)
-                self._stats_worker.error.connect(
-                    lambda msg: self.data_tab.update_health_summary("Error", 0, None, time.strftime("%Y-%m-%d %H:%M:%S")))
-            else:
-                logger.error("Failed to start IndexStatsWorker.")
+        stats_thread = dt._active_threads.get("index_stats")
+        if not (stats_thread and stats_thread.isRunning()):
+            logger.debug("run_summary_update: Starting IndexStatsWorker if needed.")
+            self.data_tab.start_index_stats_update()
+        else:
+            logger.debug("run_summary_update: IndexStatsWorker is already running.")
 
-    def update_config(self, new_config: 'MainConfig'):
+    def update_config(self, new_config: "MainConfig"):
         logger.debug("DataTabHandlers received updated configuration.")
         self.config = new_config
 
     def get_tracked_websites_path(self) -> Path:
-        app_data = Path(getattr(self.config, 'app_data_dir', './app_data'))
+        app_data = Path(getattr(self.config, "app_data_dir", "./app_data"))
         app_data.mkdir(parents=True, exist_ok=True)
         return app_data / "tracked_websites.json"
 
@@ -276,7 +303,9 @@ class DataTabHandlers:
         logger.info("Saving tracked websites...")
         path = self.get_tracked_websites_path()
         table = self.data_tab.scraped_websites_table
-        headers = [table.horizontalHeaderItem(i).text() for i in range(table.columnCount())]
+        headers = [
+            table.horizontalHeaderItem(i).text() for i in range(table.columnCount())
+        ]
         data = []
         for r in range(table.rowCount()):
             row = {}
@@ -285,11 +314,13 @@ class DataTabHandlers:
                 row[h] = itm.text() if itm else ""
             data.append(row)
         try:
-            with open(path, 'w', encoding='utf-8') as f:
+            with open(path, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2)
             logger.info(f"Saved {len(data)} website entries to {path}")
         except Exception as e:
-            logger.error(f"Failed to save tracked websites to {path}: {e}", exc_info=True)
+            logger.error(
+                f"Failed to save tracked websites to {path}: {e}", exc_info=True
+            )
 
     def load_tracked_websites(self):
         logger.info("Loading tracked websites...")
@@ -300,11 +331,15 @@ class DataTabHandlers:
             logger.warning(f"Tracked websites file not found: {path}")
             return
         try:
-            loaded = json.loads(path.read_text(encoding='utf-8'))
+            loaded = json.loads(path.read_text(encoding="utf-8"))
             if not isinstance(loaded, list):
-                logger.error(f"Invalid format in tracked websites file: Expected list, got {type(loaded)}")
+                logger.error(
+                    f"Invalid format in tracked websites file: Expected list, got {type(loaded)}"
+                )
                 return
-            headers = [table.horizontalHeaderItem(i).text() for i in range(table.columnCount())]
+            headers = [
+                table.horizontalHeaderItem(i).text() for i in range(table.columnCount())
+            ]
             table.setRowCount(len(loaded))
             valid = 0
             for idx, row_data in enumerate(loaded):
@@ -322,7 +357,9 @@ class DataTabHandlers:
                 table.setRowCount(valid)
             logger.info(f"Loaded {valid} website entries from {path}")
         except Exception as e:
-            logger.error(f"Failed to load tracked websites from {path}: {e}", exc_info=True)
+            logger.error(
+                f"Failed to load tracked websites from {path}: {e}", exc_info=True
+            )
 
     def handle_scrape_finished(self, result_data: dict):
         url = result_data.get("url", "")
@@ -331,7 +368,7 @@ class DataTabHandlers:
         try:
             logp = result_data.get("pdf_log_path")
             if logp and Path(logp).exists():
-                links = json.loads(Path(logp).read_text(encoding='utf-8'))
+                links = json.loads(Path(logp).read_text(encoding="utf-8"))
                 count = len(links)
         except:
             pass
@@ -344,36 +381,80 @@ class DataTabHandlers:
         table.setItem(row, 3, QTableWidgetItem(str(count)))
         self.save_tracked_websites()
         self.conditional_enabling()
-        # Update Website Indexed column after scrape success
+
+        # ✅ Trigger indexing only if scrape succeeded
         if result_data.get("status") == "success":
             scraped_url = result_data.get("url")
             if scraped_url:
-                self.tab.set_indexed_status_for_url(scraped_url, is_indexed=True)
-                self.tab.handlers.save_tracked_websites()
-                self.tab.handlers.run_summary_update()
+                self.data_tab.set_indexed_status_for_url(scraped_url, is_indexed=True)
+                self.save_tracked_websites()
+                self.run_summary_update()
+
+                # 🔧 FIX: Trigger indexing now
+                self.data_tab.start_refresh_index()
 
         logger.critical("***** handle_scrape_finished COMPLETED *****")
 
-    def handle_dropped_files(self, file_paths: list[str]):
-        logger.info(f"Handling {len(file_paths)} dropped file(s).")
-        if self.data_tab.is_busy():
-            self.data_tab.show_message(
-                "Busy",
-                "Cannot process dropped files: another operation is in progress.",
-                QMessageBox.Icon.Warning
+    def handle_dropped_files(self, paths: List[str]) -> None:
+        """
+        Handle files or folders dropped into the drop area.
+        Scans and indexes PDFs from dropped files/folders.
+        """
+        if not paths:
+            logger.info("No files dropped.")
+            return
+
+        if self.data_tab.is_worker_running():
+            logger.warning(
+                "A background operation is already in progress. Ignoring dropped files."
+            )
+            self.data_tab.show_warning_dialog(
+                "Busy", "Please wait until the current operation finishes."
             )
             return
-        self.process_local_files(file_paths)
+
+        local_paths = []
+
+        for path in paths:
+            try:
+                path_obj = Path(path)
+                if path_obj.is_dir():
+                    for file_path in path_obj.rglob("*.pdf"):
+                        local_paths.append(str(file_path.resolve()))
+                elif path_obj.is_file() and path_obj.suffix.lower() == ".pdf":
+                    local_paths.append(str(path_obj.resolve()))
+                else:
+                    logger.info(f"Skipped unsupported path: {path}")
+            except Exception as e:
+                logger.error(f"Error processing dropped path '{path}': {e}")
+
+        if not local_paths:
+            self.data_tab.show_warning_dialog(
+                "No PDFs Found", "Only PDF files can be indexed via drag-and-drop."
+            )
+            return
+
+        logger.info(f"[Drop] Found {len(local_paths)} local PDF(s).")
+        self.data_tab.last_operation = "add"
+        self.data_tab.start_background_worker(
+            LocalFileScanWorker,
+            self.config,
+            self.data_tab,
+            source_paths=local_paths,
+            thread_attr="_local_scan_thread",
+            worker_attr="_local_scan_worker",
+        )
 
     def process_local_files(self, file_paths: list[str]):
         if not file_paths:
             return
+
         def _do_process():
             if self.data_tab.is_busy():
                 self.data_tab.show_message(
                     "Busy",
                     "Cannot process files: operation already started.",
-                    QMessageBox.Icon.Warning
+                    QMessageBox.Icon.Warning,
                 )
                 return
             data_dir = Path(self.config.data_directory)
@@ -394,23 +475,23 @@ class DataTabHandlers:
                         copied.append(str(dest))
                 except Exception as e:
                     errors.append(f"{src.name}: {e}")
-            self.run_summary_update()
+            self.run_summary_update()  # Trigger a scan/stats update after files are potentially copied
             if skipped:
                 self.data_tab.show_message(
                     DIALOG_WARNING_TITLE,
                     "Skipped existing file(s):\n" + "\n".join(skipped),
-                    QMessageBox.Icon.Warning
+                    QMessageBox.Icon.Warning,
                 )
             if errors:
                 self.data_tab.show_message(
                     DIALOG_ERROR_TITLE,
                     "Errors copying:\n" + "\n".join(errors),
-                    QMessageBox.Icon.Critical
+                    QMessageBox.Icon.Critical,
                 )
             if copied:
                 choose = self.data_tab.prompt_confirm(
                     "Index New Documents?",
-                    f"{len(copied)} document(s) ready in data directory.\nIndex now?"
+                    f"{len(copied)} document(s) ready in data directory.\nIndex now?",
                 )
                 if choose:
                     self.data_tab.start_index_operation(mode="add", file_paths=copied)
@@ -418,7 +499,40 @@ class DataTabHandlers:
                     self.data_tab.show_message(
                         DIALOG_INFO_TITLE,
                         "Indexing skipped. Use 'Refresh Index' later if needed.",
-                        QMessageBox.Icon.Information
+                        QMessageBox.Icon.Information,
                     )
             self.conditional_enabling()
+
         QTimer.singleShot(0, _do_process)
+
+    # --- 🔧 FIX: Add handle_index_stats_finished method ---
+    @pyqtSlot(object)  # Match the signal signature
+    def handle_index_stats_finished(self, result: Any):  # Use Any for type hint
+        """Handles the result from IndexStatsWorker."""
+        logger.debug(
+            f"handle_index_stats_finished received result: {result} (type: {type(result)})"
+        )
+        if isinstance(result, tuple) and len(result) == 3:
+            count, status_label, timestamp = result
+            local_txt = self.data_tab.health_local_files_label.text()
+            local_val = None
+            try:
+                num = local_txt.split(":")[-1].strip()
+                if num.isdigit():
+                    local_val = int(num)
+            except:
+                pass
+            # Ensure we get the count from the result, not re-query Qdrant here
+            self.data_tab.update_health_summary(
+                status_label, count, local_val, timestamp
+            )
+        else:
+            logger.error(
+                f"handle_index_stats_finished received unexpected result type: {type(result)}"
+            )
+            # Optionally update status to indicate an error occurred during stats processing
+            self.data_tab.update_health_summary(
+                "Error", 0, None, time.strftime("%Y-%m-%d %H:%M:%S")
+            )
+
+    # --- END FIX ---

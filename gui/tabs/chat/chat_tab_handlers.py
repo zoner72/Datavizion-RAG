@@ -10,6 +10,7 @@ try:
 except ImportError:
     LLMWorker = None
 
+
 class ChatTabHandlers:
     def __init__(self, tab):
         self.tab = tab
@@ -43,12 +44,12 @@ class ChatTabHandlers:
                 query=query,
                 conversation_id=self.tab.conversation_id,
                 index_manager=self.tab.index_manager,
-                embedding_model_query=self.tab.embedding_model_query
+                embedding_model_query=self.tab.embedding_model_query,
             )
             self.tab.worker.finished.connect(self.query_finished)
             self.tab.worker.error.connect(self.query_error)
             self.tab.worker.partialResponse.connect(self.append_partial_response)
-            if hasattr(self.tab.main_window, 'start_worker_thread'):
+            if hasattr(self.tab.main_window, "start_worker_thread"):
                 self.tab.main_window.start_worker_thread(self.tab.worker)
             else:
                 self.tab.worker.run()
@@ -87,9 +88,9 @@ class ChatTabHandlers:
         if not query or not corrected:
             logging.warning("ChatTabHandlers: No query or correction to save.")
             return
-        if hasattr(self.tab.main_window, 'query_cache'):
+        if hasattr(self.tab.main_window, "query_cache"):
             self.tab.main_window.query_cache[query] = corrected
-            if hasattr(self.tab.main_window, 'save_cache'):
+            if hasattr(self.tab.main_window, "save_cache"):
                 self.tab.main_window.save_cache()
         save_correction_for_training(query, corrected)
         self.tab.conversation_display.append("<i>✅ Correction saved for training.</i>")
@@ -98,7 +99,7 @@ class ChatTabHandlers:
 
     def start_new_chat(self):
         if self.tab.is_processing and self.tab.worker:
-            if hasattr(self.tab.worker, 'stop'):
+            if hasattr(self.tab.worker, "stop"):
                 self.tab.worker.stop()
         self.tab.conversation_display.clear()
         self.tab.query_input.clear()
@@ -108,8 +109,9 @@ class ChatTabHandlers:
         self.tab.last_successful_query = ""
         self.tab.is_processing = False
         self.tab.worker = None
-        if hasattr(self.tab.main_window, 'conversation_id'):
+        if hasattr(self.tab.main_window, "conversation_id"):
             from uuid import uuid4
+
             self.tab.main_window.conversation_id = str(uuid4())
             self.tab.conversation_id = self.tab.main_window.conversation_id
         self._unlock_ui_after_processing()
@@ -129,7 +131,9 @@ class ChatTabHandlers:
         self.tab.ask_button.setEnabled(True)
         self.tab.query_input.setEnabled(True)
         self.tab.new_chat_button.setEnabled(True)
-        self.tab.submit_correction_button.setEnabled(bool(self.tab.last_successful_query))
+        self.tab.submit_correction_button.setEnabled(
+            bool(self.tab.last_successful_query)
+        )
         self.tab.correction_input.setEnabled(bool(self.tab.last_successful_query))
 
     def update_config(self, new_config: MainConfig):

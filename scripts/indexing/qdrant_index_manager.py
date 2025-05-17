@@ -1,773 +1,1368 @@
-# --- START OF FILE scripts/indexing/qdrant_index_manager.py ---
+# scripts/indexing/qdrant_index_manager.py
 
+import hashlib
 import logging
+import multiprocessing
+import os
 import time
 import uuid
-from typing import Optional, List, Dict, Callable, Any
+from dataclasses import asdict, dataclass
 from pathlib import Path
-import sys
-import os
-import multiprocessing
-from functools import partial
-import copy # Added to deepcopy config dict
+from typing import Any, Callable, Dict, List, Optional
 
 import torch
 from httpx import ConnectError, ReadTimeout
 from qdrant_client import QdrantClient, models
 from qdrant_client.http.exceptions import ResponseHandlingException, UnexpectedResponse
 
+from config_models import MainConfig, QdrantConfig
+from scripts.ingest.data_loader import DataLoader, RejectedFileError
 
-from qdrant_client.models import (Filter, FieldCondition, MatchValue, SearchParams,
-                                  ScrollRequest, PointStruct)
-
-from scripts.ingest.data_loader import DEFAULT_MAX_SEQ_LENGTH
-
-try:
-    from scripts.ingest.data_loader import DataLoader, RejectedFileError
-except ImportError as e:
-    logging.critical(f"Failed to import DataLoader: {e}", exc_info=True)
-    class DataLoader:
-        def __init__(self, config): pass
-        def load_and_preprocess_file(self, fp): return []
-    class RejectedFileError(Exception): pass
-
-try:
-    # Assumes config_models.py is in the project root
-    project_root_dir = Path(__file__).resolve().parents[2]
-    if str(project_root_dir) not in sys.path:
-        sys.path.insert(0, str(project_root_dir))
-    from config_models import MainConfig
-    pydantic_available = True
-except ImportError as e:
-    logging.critical(f"FATAL ERROR: Pydantic models unavailable: {e}", exc_info=True)
-    pydantic_available = False
-    class MainConfig: pass # Dummy class
-
-try:
-    # Import SentenceTransformer if available
-    from sentence_transformers import SentenceTransformer
-    sentence_transformers_available = True
-except ImportError:
-    logging.critical("sentence-transformers library not found.")
-    SentenceTransformer = None # Define as None to prevent NameErrors
-    sentence_transformers_available = False
-
-# Setup module logger
 logger = logging.getLogger(__name__)
 
 
-def _process_single_file_worker(file_path: str, worker_config_dict: dict) -> List[Dict]:
-    """
-    Worker function executed by each process in the multiprocessing Pool.
+# The Qdrant key for the 'last_modified' conceptual field
+QDRANT_KEY_LAST_MODIFIED = MainConfig.METADATA_TAGS.get("last_modified")
+if QDRANT_KEY_LAST_MODIFIED is None:
+    logger.critical(
+        "'last_modified' not found in MainConfig.METADATA_TAGS. Refresh functionality will be impaired."
+    )
+    # Fallback to a default or raise an error, depending on desired strictness
+    # For now, let it proceed, but refresh_index will likely fail if this is None.
 
-    Receives a pre-merged config dictionary containing the correct settings
-    (including profile overrides). Initializes DataLoader and processes the file.
-    Returns list of chunk dictionaries or empty list on failure/rejection.
-    """
-    pid = os.getpid()
-    short_filename = os.path.basename(file_path)
-    print(f"[Worker PID: {pid}] Starting processing: {short_filename}", file=sys.stdout, flush=True)
+# The Qdrant key for the 'source_filepath' conceptual field
+QDRANT_KEY_SOURCE_FILEPATH = MainConfig.METADATA_TAGS.get("source_filepath")
+if QDRANT_KEY_SOURCE_FILEPATH is None:
+    logger.critical(
+        "'source_filepath' not found in MainConfig.METADATA_TAGS. Filepath-based lookups will be impaired."
+    )
 
+
+def _worker_initializer(cfg: dict):
+    """Initialize DataLoader and chunking params in each worker."""
+    global _worker_dataloader, _worker_chunk_size, _worker_chunk_overlap
+    global _worker_clean_html, _worker_lowercase, _worker_file_filters
+
+    _worker_dataloader = DataLoader()
+    _worker_chunk_size = cfg["chunk_size"]
+    _worker_chunk_overlap = cfg["chunk_overlap"]
+    _worker_clean_html = cfg["clean_html"]
+    _worker_lowercase = cfg["lowercase"]
+    _worker_file_filters = cfg["file_filters"]
+
+
+def _process_single_file_worker(file_path: str) -> dict:
+    """Worker function: load, chunk and return results or error."""
     try:
-        from config_models import MainConfig # Re-import within process
-        if not pydantic_available: # Check again inside worker
-             print(f"[Worker PID: {pid}] ERROR: Pydantic models unavailable in worker.", file=sys.stderr, flush=True)
-             return []
-        config = MainConfig.model_validate(worker_config_dict)
-
-        from scripts.ingest.data_loader import DataLoader, RejectedFileError # Re-import
-        dataloader = DataLoader(config)
-
-        file_data_tuples = dataloader.load_and_preprocess_file(file_path) # No extra args needed
-
-        chunk_dicts = []
-        if file_data_tuples: # Check if list is not empty
-            for _, chunk_dict in file_data_tuples:
-                # Ensure it's actually a dictionary before appending
-                if isinstance(chunk_dict, dict):
-                    chunk_dicts.append(chunk_dict)
-
-        print(f"[Worker PID: {pid}] Finished processing: {short_filename}, Chunks: {len(chunk_dicts)}", file=sys.stdout, flush=True)
-        return chunk_dicts
-
-    except RejectedFileError:
-        # Log rejection clearly
-        print(f"[Worker PID: {pid}] Rejected file: {short_filename}", file=sys.stdout, flush=True)
-        return [] # Return empty list for rejected files
-
+        # Ensure global variables are accessible if this worker runs in a new process context
+        # This might require passing them explicitly or ensuring they are correctly set by _worker_initializer
+        tuples = _worker_dataloader.load_and_preprocess_file(
+            file_path,
+            _worker_chunk_size,
+            _worker_chunk_overlap,
+            _worker_clean_html,
+            _worker_lowercase,
+            _worker_file_filters,
+        )
+        chunks = [chunk for _, chunk in tuples if isinstance(chunk, dict)]
+        return {"file": file_path, "chunks": chunks, "error": None}
+    except RejectedFileError as e:
+        logger.warning(f"Skipping {file_path}: {e}")
+        return {"file": file_path, "chunks": [], "error": str(e)}
     except Exception as e:
-        # Log unexpected errors from the worker process
-        print(f"[Worker PID: {pid}] ERROR processing {short_filename}: {type(e).__name__} - {e}", file=sys.stderr, flush=True)
-        # Uncomment traceback for detailed debugging if needed
-        import traceback
-        print(traceback.format_exc(), file=sys.stderr, flush=True)
-        return [] # Return empty list on any processing error
+        logger.error(f"Error on {file_path}: {e}", exc_info=True)
+        return {"file": file_path, "chunks": [], "error": str(e)}
 
-class QdrantResult:
-    """Wrapper for Qdrant search results for consistent access."""
-    def __init__(self, payload: Optional[Dict], score: Optional[float]):
-        self.payload = payload if payload is not None else {}
-        self.score = score if score is not None else 0.0
 
-    def get(self, key: str, default: Any = None) -> Any:
-        """Gets a value directly from the payload dictionary."""
-        return self.payload.get(key, default)
-
-    def get_metadata(self, key: str, default: Any = None) -> Any:
-        """Gets a value from the 'metadata' dictionary within the payload."""
-        metadata_dict = self.payload.get("metadata", {})
-        return metadata_dict.get(key, default)
-
-    @property
-    def text(self) -> Optional[str]:
-        """Gets the text content, preferring 'text_with_context'."""
-        return self.payload.get("text_with_context", self.payload.get("text"))
-
-    @property
-    def metadata(self) -> Dict:
-        """Gets the entire metadata dictionary from the payload."""
-        return self.payload.get("metadata", {})
+@dataclass
+class WorkerConfig:
+    chunk_size: int
+    chunk_overlap: int
+    clean_html: bool
+    lowercase: bool
+    file_filters: List[str]
 
 
 class QdrantIndexManager:
-    """Manages interaction with a Qdrant vector collection, including indexing and search."""
+    """Manages a Qdrant collection for embeddings: add, search, rebuild, refresh."""
 
-    # --- Initialization and Connection ---
-    def __init__(self, config: MainConfig, model_index: Optional[SentenceTransformer]):
-        """Initializes the Qdrant client, DataLoader, and ensures the collection exists."""
-        if not pydantic_available:
-            raise RuntimeError("QdrantIndexManager cannot function without Pydantic models.")
+    def __init__(self, config: MainConfig, model_index: Any):
+        self.config = config
+        self.model_index = model_index
+        self.client: Optional[QdrantClient] = None
 
-        if not sentence_transformers_available and model_index is not None:
-            logging.warning("SentenceTransformer library not found, but model instance provided.")
-        elif model_index is None:
-            logging.warning("QdrantIndexManager initialized without an indexing embedding model.")
+        qc = config.qdrant
+        self.collection_name = qc.collection_name
+        self.vector_size: Optional[int] = None
 
-        self.config: MainConfig = config
-        self.model_index: Optional[SentenceTransformer] = model_index
-        self.client: Optional[QdrantClient] = None # Initialize client attribute
-
-        # Extract Qdrant connection details
-        qdrant_config = self.config.qdrant
-        self.qdrant_host: str = qdrant_config.host
-        self.qdrant_port: int = qdrant_config.port
-        self.qdrant_api_key: Optional[str] = qdrant_config.api_key
-        self.use_https: bool = False # Assuming http for now
-        self.collection_name: str = qdrant_config.collection_name
-        self.vector_size: Optional[int] = None # Determined later
-
-        if DataLoader:
-            try:
-                self.dataloader = DataLoader(self.config)
-            except Exception as e:
-                logging.error(f"Failed to initialize main DataLoader instance: {e}", exc_info=True)
-                self.dataloader = None
-        else:
+        try:
+            self.dataloader = DataLoader()
+        except Exception:
+            logger.error("Failed to init DataLoader", exc_info=True)
             self.dataloader = None
-            logging.error("DataLoader class could not be imported. Refresh/Rebuild will fail.")
 
-        # --- Connection Retry Logic ---
-        retries: int = qdrant_config.connection_retries
-        initial_delay: int = qdrant_config.connection_initial_delay
-        client_timeout: int = qdrant_config.client_timeout
-        attempt: int = 0
-        delay: int = initial_delay
-        last_exception: Optional[Exception] = None
-
-        while attempt < retries:
-            attempt += 1
-            try:
-                logger.info(f"Attempt {attempt}/{retries} to connect to Qdrant: {self.qdrant_host}:{self.qdrant_port}...")
-                self.client = QdrantClient(
-                    host=self.qdrant_host,
-                    port=self.qdrant_port,
-                    api_key=self.qdrant_api_key,
-                    https=self.use_https,
-                    timeout=client_timeout
-                )
-                self.client.get_collections() # Verify connection
-                logger.info("Qdrant client initialized and connection verified.")
-                self._ensure_collection() # Verify or create collection
-                logger.info(f"Collection '{self.collection_name}' is ready.")
-                return # Success
-
-            except (ConnectError, ReadTimeout, ResponseHandlingException, UnexpectedResponse) as e:
-                last_exception = e
-                logger.warning(f"Qdrant connection attempt {attempt} failed: {type(e).__name__} - {e}")
-                if attempt < retries:
-                    time.sleep(delay)
-                    delay = min(delay * 2, 30)
-                else:
-                    raise ConnectionError(f"Cannot connect to Qdrant after {retries} attempts.") from last_exception
-            except Exception as e:
-                 last_exception = e
-                 logger.error(f"Unexpected error initializing Qdrant client on attempt {attempt}.", exc_info=True)
-                 if attempt >= retries:
-                     raise RuntimeError("Unexpected error during Qdrant client initialization.") from last_exception
-                 time.sleep(delay)
-                 delay = min(delay * 2, 30)
-
-        if self.client is None:
-             raise ConnectionError("Failed to initialize Qdrant client after all retries.")
-
-    # --- Collection Management ---
-    def _ensure_collection(self):
-        """Ensures the collection exists, handling creation or recreation based on config."""
-        if self.client is None:
-            raise RuntimeError("Qdrant client is not available for _ensure_collection.")
-
-        try:
-            existing_collections_response = self.client.get_collections()
-            existing_collection_names = {c.name for c in existing_collections_response.collections}
-            logger.debug(f"Existing collections on server: {existing_collection_names}")
-
-            should_create_or_recreate = (self.config.qdrant.force_recreate or
-                                         self.collection_name not in existing_collection_names)
-
-            if should_create_or_recreate:
-                self._create_or_recreate_collection(existing_collection_names)
-            else:
-                self._use_existing_collection()
-
-        except Exception as e:
-            logger.error(f"Failed to ensure collection '{self.collection_name}' exists: {e}", exc_info=True)
-            raise RuntimeError(f"Could not initialize or verify Qdrant collection '{self.collection_name}'") from e
-
-    def _create_or_recreate_collection(self, existing_collection_names: set):
-        """Handles the logic for creating or recreating the collection."""
-        if self.config.qdrant.force_recreate and self.collection_name in existing_collection_names:
-            logger.warning(f"Force-recreate enabled: deleting existing collection '{self.collection_name}'...")
-            try:
-                self.client.delete_collection(collection_name=self.collection_name, timeout=60)
-                logger.info(f"Successfully deleted collection '{self.collection_name}'.")
-            except Exception as exc:
-                logger.warning(f"Could not delete collection '{self.collection_name}' during force-recreate (continuing...): {exc}")
-
-        if self.vector_size is None:
-            self.vector_size = self._get_embedding_dim()
-
-        quantization_config = None
-        if self.config.qdrant.quantization_enabled:
-            quantization_config = models.ScalarQuantization(
-                scalar=models.ScalarQuantizationConfig(
-                    type=models.ScalarType.INT8,
-                    quantile=0.99,
-                    always_ram=self.config.qdrant.quantization_always_ram
-                )
+        self._connect_and_setup(qc)
+        print(
+            f"--- QdrantIndexManager initialized. Has _get_worker_config: {hasattr(self, '_get_worker_config')} ---"
+        )
+        if hasattr(self, "_get_worker_config"):
+            print(
+                f"--- Type of _get_worker_config: {type(self._get_worker_config)} ---"
             )
-            logger.info("Scalar quantization configured for the new collection.")
 
-        vectors_config = models.VectorParams(
-            size=self.vector_size,
-            distance=models.Distance.COSINE,
-            quantization_config=quantization_config
-        )
+    def _connect_and_setup(self, qc: QdrantConfig):  # qc is config.qdrant
+        retries = qc.connection_retries
+        delay = qc.connection_initial_delay
 
-        logger.info(f"Creating Qdrant collection '{self.collection_name}' (dimension={self.vector_size})...")
-        self.client.create_collection(
-            collection_name=self.collection_name,
-            vectors_config=vectors_config,
-            timeout=60
-        )
-        logger.info(f"Collection '{self.collection_name}' created successfully.")
-
-    def _use_existing_collection(self):
-        """Handles logic when using an existing collection and infers vector size."""
-        logger.info(f"Using existing Qdrant collection '{self.collection_name}'.")
-        if self.vector_size is None:
-            logger.debug("Inferring vector size from existing collection...")
+        for attempt in range(1, retries + 1):
             try:
-                collection_info = self.client.get_collection(collection_name=self.collection_name)
-                vector_params = collection_info.config.params.vectors
+                logger.info(
+                    f"Qdrant setup attempt {attempt}/{retries} for collection '{self.collection_name}' at {qc.host}:{qc.port}"
+                )
+                self.client = QdrantClient(
+                    host=qc.host,
+                    port=qc.port,
+                    api_key=qc.api_key,
+                    https=False,  # Assuming HTTP
+                    timeout=qc.client_timeout,
+                )
 
-                if isinstance(vector_params, dict): # Named vectors
-                    if not vector_params: raise ValueError("Collection vector params is empty dict.")
-                    first_vector_name = next(iter(vector_params))
-                    self.vector_size = vector_params[first_vector_name].size
-                elif hasattr(vector_params, "size"): # Single unnamed vector
-                    self.vector_size = vector_params.size
-                else:
-                    raise ValueError(f"Unknown vector params structure: {vector_params}")
+                collection_found = False
+                try:
+                    # Attempt to get the collection
+                    info = self.client.get_collection(self.collection_name)
+                    collection_found = True
+                    logger.info(f"Collection '{self.collection_name}' found.")
 
-                logger.info(f"Inferred vector size from existing collection: {self.vector_size}")
-            except Exception as e:
-                 logger.error(f"Failed to infer vector size for existing collection: {e}", exc_info=True)
-                 raise RuntimeError(f"Could not determine vector size for collection '{self.collection_name}'.") from e
+                    # Determine existing vector size (using your existing complex logic from the provided file)
+                    existing_vector_size = None
+                    if (
+                        hasattr(info, "vectors_config")
+                        and info.vectors_config is not None
+                    ):
+                        if isinstance(info.vectors_config, dict):
+                            vec_cfg_dict = info.vectors_config
+                            default_vec_name = next(iter(vec_cfg_dict), None)
+                            if default_vec_name and hasattr(
+                                vec_cfg_dict[default_vec_name], "size"
+                            ):
+                                existing_vector_size = vec_cfg_dict[
+                                    default_vec_name
+                                ].size
+                        elif hasattr(info.vectors_config, "size"):
+                            existing_vector_size = info.vectors_config.size
+                    elif (
+                        hasattr(info, "config")
+                        and hasattr(info.config, "params")
+                        and hasattr(info.config.params, "vectors")
+                        and info.config.params.vectors is not None
+                    ):
+                        if isinstance(info.config.params.vectors, dict):
+                            default_vec_name = next(
+                                iter(info.config.params.vectors), None
+                            )
+                            if default_vec_name and hasattr(
+                                info.config.params.vectors[default_vec_name], "size"
+                            ):
+                                existing_vector_size = info.config.params.vectors[
+                                    default_vec_name
+                                ].size
+                        elif hasattr(info.config.params.vectors, "size"):
+                            existing_vector_size = info.config.params.vectors.size
 
-    def _get_embedding_dim(self) -> int:
-        """Infers embedding dimension from the indexing model instance."""
-        if self.model_index is None:
-            raise ValueError("Cannot get embedding dimension: self.model_index is not set.")
-        if not sentence_transformers_available:
-            raise RuntimeError("SentenceTransformer library unavailable.")
-        if not callable(getattr(self.model_index, "encode", None)):
-            raise TypeError("self.model_index has no callable 'encode' method.")
+                    if existing_vector_size is None:
+                        logger.warning(
+                            f"Could not reliably determine vector size from existing CollectionInfo: {info}. Attempting fallback for validation."
+                        )
+                        if self.model_index and hasattr(
+                            self.model_index, "get_sentence_embedding_dimension"
+                        ):
+                            existing_vector_size = (
+                                self.model_index.get_sentence_embedding_dimension()
+                            )
+                            if not existing_vector_size or existing_vector_size <= 0:
+                                raise RuntimeError(
+                                    "Fallback to model dimension failed or returned invalid size for existing collection."
+                                )
+                            logger.info(
+                                f"Inferred vector_size from model_index for existing collection: {existing_vector_size}"
+                            )
+                        else:
+                            raise RuntimeError(
+                                "Cannot determine vector size from CollectionInfo and no model_index fallback for existing collection."
+                            )
 
-        logger.debug("Inferring embedding dimension via test encode...")
+                    self.vector_size = existing_vector_size  # Cache the found size
+
+                except UnexpectedResponse as e:
+                    if e.status_code == 404:
+                        logger.warning(
+                            f"Collection '{self.collection_name}' not found (404). Will proceed to _ensure_collection for creation."
+                        )
+                        collection_found = False  # Explicitly mark as not found
+                        # self.vector_size remains None or its previous value, _ensure_collection will handle it
+                    else:
+                        # Other UnexpectedResponse, let the outer catch handle it for retry
+                        raise e
+                self._ensure_collection()  # This method should now correctly create or validate/recreate
+
+                if not self.vector_size or self.vector_size <= 0:
+                    raise RuntimeError(
+                        f"Collection setup finished but self.vector_size is invalid: {self.vector_size}"
+                    )
+
+                logger.info(
+                    f"Qdrant setup successful for collection '{self.collection_name}'. Final vector_size: {self.vector_size}"
+                )
+                return  # Successful setup
+
+            except (
+                ConnectError,
+                ReadTimeout,
+                ResponseHandlingException,
+                UnexpectedResponse,
+                RuntimeError,
+                ValueError,
+            ) as e_loop:
+                logger.warning(
+                    f"Qdrant connection/setup attempt {attempt} failed: {type(e_loop).__name__} - {str(e_loop)[:500]}"
+                )
+                if attempt == qc.connection_retries:
+                    logger.critical(
+                        f"All {qc.connection_retries} attempts to connect/setup Qdrant failed for collection '{self.collection_name}'."
+                    )
+                    raise ConnectionError(
+                        f"Could not connect to Qdrant or configure collection '{self.collection_name}' after {qc.connection_retries} attempts: {e_loop}"
+                    ) from e_loop
+                time.sleep(delay)
+                delay = min(delay * 2, 30)
+        raise ConnectionError(
+            f"Exhausted all retries for Qdrant setup of '{self.collection_name}'."
+        )
+
+    # Ensure _ensure_collection correctly uses/infers vector_size for creation
+    def _ensure_collection(self):
         try:
-            test_vector = None
-            try:
-                with torch.no_grad():
-                    test_vector = self.model_index.encode("test sentence")
-            except RuntimeError as e:
-                if "out of memory" in str(e).lower(): # GPU OOM
-                    logger.warning("GPU OOM on dim check, retrying on CPU.")
-                    original_device = self.model_index.device
-                    self.model_index.to("cpu")
-                    with torch.no_grad():
-                        test_vector = self.model_index.encode("test sentence", device="cpu")
-                    try: self.model_index.to(original_device) # Try to restore device
-                    except Exception: pass
-                else: raise # Re-raise other runtime errors
-            if test_vector is None:
-                raise RuntimeError("Test encoding returned None.")
-
-            dimension = -1
-            if hasattr(test_vector, "shape") and len(test_vector.shape) > 0:
-                dimension = test_vector.shape[-1]
-            elif isinstance(test_vector, list) and test_vector:
-                first_element = test_vector[0]
-                if hasattr(first_element, "shape") and len(first_element.shape) > 0:
-                     dimension = first_element.shape[-1]
-                elif isinstance(first_element, (int, float)):
-                     dimension = len(test_vector)
-            if dimension <= 0:
-                 raise ValueError(f"Could not determine positive dimension from result type {type(test_vector)}")
-
-            logger.info(f"Inferred embedding dimension: {dimension}")
-            return dimension
-
+            existing_collections = self.client.get_collections()
+            existing_names = {c.name for c in existing_collections.collections}
         except Exception as e:
-            logger.error(f"Failed to get embedding dimension: {e}", exc_info=True)
-            raise RuntimeError("Could not determine embedding dimension.") from e
+            logger.error(
+                f"Failed to get existing collections from Qdrant: {e}", exc_info=True
+            )
+            existing_names = (
+                set()
+            )  # Assume none exist if listing fails, to trigger creation path
 
-    # --- Basic Operations ---
+        collection_needs_creation_or_recreation = False
+        if self.config.qdrant.force_recreate:
+            logger.info(
+                f"force_recreate is True for collection '{self.collection_name}'. Marking for recreation."
+            )
+            collection_needs_creation_or_recreation = True
+        elif self.collection_name not in existing_names:
+            logger.info(
+                f"Collection '{self.collection_name}' not in existing Qdrant collections. Marking for creation."
+            )
+            collection_needs_creation_or_recreation = True
+        else:  # Collection exists, check dimension if not forcing recreate
+            logger.debug(
+                f"Collection '{self.collection_name}' exists. Checking configuration."
+            )
+            desired_vector_size = self.config.vector_size or self._get_embedding_dim()
+            if not desired_vector_size or desired_vector_size <= 0:
+                raise RuntimeError(
+                    f"Cannot ensure collection: Invalid desired vector size {desired_vector_size}."
+                )
+
+            if self.vector_size and self.vector_size != desired_vector_size:
+                logger.warning(
+                    f"Dimension mismatch for '{self.collection_name}'. Existing: {self.vector_size}, Desired: {desired_vector_size}. Marking for recreation."
+                )
+                collection_needs_creation_or_recreation = True
+            elif (
+                not self.vector_size
+            ):  # Could not determine existing size, but collection exists. Risky.
+                logger.warning(
+                    f"Could not determine vector size of existing collection '{self.collection_name}'. "
+                    f"If force_recreate is false, this might lead to issues. Desired size is {desired_vector_size}."
+                )
+        if collection_needs_creation_or_recreation:
+            size_for_creation = (
+                self.config.vector_size
+            )  # From MainConfig (could be None)
+            if not isinstance(size_for_creation, int) or size_for_creation <= 0:
+                logger.info(
+                    f"vector_size not explicitly in config or invalid ({size_for_creation}). Inferring from model for _ensure_collection."
+                )
+                size_for_creation = self._get_embedding_dim()
+            if not isinstance(size_for_creation, int) or size_for_creation <= 0:
+                raise RuntimeError(
+                    f"Cannot create/recreate collection '{self.collection_name}': Invalid or unknown vector dimension ({size_for_creation})."
+                )
+
+            logger.info(
+                f"Proceeding to clear/recreate '{self.collection_name}' with vector size {size_for_creation}."
+            )
+            if not self.clear_index(
+                vector_size_override=size_for_creation
+            ):  # Pass the determined size
+                raise RuntimeError(
+                    f"Failed to clear/recreate index for '{self.collection_name}' during ensure_collection."
+                )
+            self.vector_size = size_for_creation  # Ensure self.vector_size is updated
+        else:
+            logger.debug(
+                f"Using existing collection '{self.collection_name}' as per configuration."
+            )
+            # Ensure self.vector_size is set if it wasn't (e.g. if it was None and collection existed)
+            if self.vector_size is None:
+                self.vector_size = self.config.vector_size or self._get_embedding_dim()
+                if not self.vector_size or self.vector_size <= 0:
+                    raise RuntimeError(
+                        f"Collection '{self.collection_name}' exists but its vector size could not be determined or set."
+                    )
+
+    def recreate_collection(self, vector_size: int) -> bool:
+        try:
+            if not self.client:
+                logger.error("Qdrant client not initialized for recreate_collection.")
+                return False
+
+            collection_exists = False
+            try:
+                self.client.get_collection(collection_name=self.collection_name)
+                collection_exists = True
+            except UnexpectedResponse as e:
+                if e.status_code != 404:
+                    logger.warning(
+                        f"Unexpected error checking collection existence before recreate: {e.status_code} - {e.content!r}"
+                    )
+                    # Depending on strictness, might re-raise or just proceed
+            except Exception as e_check:
+                logger.warning(
+                    f"Error checking collection existence: {e_check}. Proceeding with recreate attempt."
+                )
+
+            if collection_exists:
+                logger.info(
+                    f"Collection '{self.collection_name}' exists. Attempting to delete before recreate."
+                )
+                try:
+                    self.client.delete_collection(collection_name=self.collection_name)
+                    logger.info(
+                        f"Successfully deleted collection '{self.collection_name}'."
+                    )
+                except Exception as e_del:  # Could be UnexpectedResponse if delete fails on non-existent
+                    logger.warning(
+                        f"Failed to delete existing collection '{self.collection_name}': {e_del}. Will attempt recreate anyway.",
+                        exc_info=True,
+                    )
+
+            logger.info(
+                f"Attempting to create/recreate collection '{self.collection_name}' with "
+                f"vector size {vector_size} and distance {self.config.qdrant.distance}."
+            )
+            self.client.recreate_collection(
+                collection_name=self.collection_name,
+                vectors_config=models.VectorParams(
+                    size=vector_size,  # Use the explicitly passed vector_size
+                    distance=self.config.qdrant.distance,  # This should be the enum after Pydantic validation
+                ),
+            )
+            logger.info(
+                f"Collection '{self.collection_name}' successfully created/recreated with vector size {vector_size}."
+            )
+            return True
+        except Exception as e:
+            logger.error(
+                f"Failed to recreate collection '{self.collection_name}': {e}",
+                exc_info=True,
+            )
+            return False
+
     def count(self) -> Optional[int]:
-        """Returns the approximate number of vectors in the collection."""
         if not self.check_connection():
-            logger.error("Cannot get count: Qdrant connection unavailable.")
             return None
         try:
-            count_response = self.client.count(collection_name=self.collection_name, exact=False)
-            vector_count = count_response.count
-            logger.info(f"Approx vector count for '{self.collection_name}': {vector_count:,}") # Added comma
-            return vector_count
+            return self.client.count(
+                collection_name=self.collection_name,
+                exact=False,  # exact=False is faster for approximations
+            ).count
         except Exception as e:
-            logger.error(f"Failed count request: {e}", exc_info=False)
+            logger.error(
+                f"Failed to count vectors in {self.collection_name}: {e}", exc_info=True
+            )
             return None
 
     def check_connection(self) -> bool:
-        """Checks connectivity to the Qdrant server."""
-        if self.client is None:
-            logger.error("Cannot check connection: client not initialized.")
+        if not self.client:
             return False
         try:
-            self.client.get_collections() # Lightweight check
-            logger.debug("Qdrant connection check successful.")
+            self.client.get_collections()  # A lightweight way to check connectivity
             return True
         except Exception as e:
-            logger.warning(f"Qdrant connection check failed: {type(e).__name__}")
+            logger.warning(f"Qdrant connection check failed: {e}")
             return False
 
-    def clear_index(self) -> bool:
-        """Deletes and re-initializes the Qdrant collection."""
-        if not self.check_connection():
-            logger.error("Cannot clear index: Qdrant connection unavailable.")
-            return False
+    def clear_index(self, vector_size_override: Optional[int] = None) -> bool:
         try:
-            logger.warning(f"Attempting to DELETE and recreate collection: '{self.collection_name}'")
-            delete_result = self.client.delete_collection(collection_name=self.collection_name, timeout=60)
-            logger.info(f"Collection delete result: {delete_result}. Re-initializing...")
-            self._ensure_collection() # Recreate the collection
-            logger.info(f"Successfully cleared and reinitialized collection '{self.collection_name}'.")
-            return True
-        except Exception as e:
-             logger.error(f"Error during clear index operation: {e}", exc_info=True)
-             try: # Attempt recovery
-                 logger.warning("Attempting ensure_collection after clear error...")
-                 self._ensure_collection()
-             except Exception as init_e:
-                 logger.error(f"CRITICAL: Failed recovery after clear error: {init_e}", exc_info=True)
-             return False # Indicate clear operation failed
+            if not self.client:
+                logger.error("Qdrant client not initialized. Cannot clear index.")
+                return False
 
-    # --- Indexing ---
-    def add_documents(
-        self,
-        documents: List[Dict],
-        progress_callback: Optional[Callable[[int, int], None]] = None,
-        worker_is_running_flag: Optional[Callable[[], bool]] = None
-    ) -> int:
-        """Embeds and upserts document chunks into the Qdrant collection."""
-        if not self.check_connection(): logger.error("Add docs failed: No Qdrant connection."); return 0
-        if self.model_index is None: logger.error("Add docs failed: Indexing model missing."); return 0
-        if not documents: logger.info("No documents provided to add."); return 0
+            # Determine the vector size to use for recreation
+            size_to_use = vector_size_override
+            if size_to_use is None:  # If not overridden, try self.vector_size or infer
+                size_to_use = self.vector_size
+                if not isinstance(size_to_use, int) or size_to_use <= 0:
+                    logger.info(
+                        "Vector size not cached or invalid, trying to infer from model for clear_index."
+                    )
+                    size_to_use = self._get_embedding_dim()
 
-        total_added_updated = 0
-        total_processed = 0
-        total_skipped = 0
-        embedding_batch_size = self.config.embedding_batch_size
-        total_documents_to_process = len(documents)
-        logger.info(f"Starting batch indexing for {total_documents_to_process} chunks...")
-
-        for i in range(0, total_documents_to_process, embedding_batch_size):
-            if worker_is_running_flag and not worker_is_running_flag():
-                logger.warning("Cancellation requested during document batching.")
-                raise InterruptedError("Add documents cancelled.")
-
-            batch_docs = documents[i : i + embedding_batch_size]
-            texts_to_embed, valid_indices, payloads, point_ids = [], [], [], []
-
-            for idx, chunk_dict in enumerate(batch_docs):
-                total_processed += 1
-                text_with_context = chunk_dict.get("text_with_context")
-                metadata = chunk_dict.get("metadata", {})
-                chunk_id = metadata.get("chunk_id") # Use stable chunk_id
-
-                is_valid = (text_with_context and isinstance(text_with_context, str) and text_with_context.strip() and
-                            isinstance(chunk_dict, dict) and
-                            chunk_id and isinstance(chunk_id, str))
-
-                if is_valid:
-                    texts_to_embed.append(text_with_context)
-                    valid_indices.append(idx)
-                    payloads.append(chunk_dict) # Pass the whole dict as payload
-                    point_ids.append(chunk_id)
-                else:
-                    total_skipped += 1
-                    logger.warning(f"Skipping invalid chunk dict at index {i+idx}.") # Add details?
-
-            if not texts_to_embed:
-                if progress_callback: progress_callback(min(total_processed, total_documents_to_process), total_documents_to_process)
-                continue
-
-            logger.debug(f"Embedding batch {i // embedding_batch_size + 1} ({len(texts_to_embed)} texts)...")
-            try:
-                with torch.no_grad():
-                    vectors = self.model_index.encode(texts_to_embed, show_progress_bar=False)
-            except RuntimeError as e: # OOM Handling
-                if "out of memory" in str(e).lower():
-                    logger.warning("GPU OOM embedding batch, retrying on CPU.")
-                    self.model_index.to("cpu")
-                    try:
-                        with torch.no_grad(): vectors = self.model_index.encode(texts_to_embed, show_progress_bar=False, device="cpu")
-                    except Exception as cpu_e: raise RuntimeError(f"Embedding failed on CPU for batch {i}") from cpu_e
-                else: raise
-            except Exception as embed_e: raise RuntimeError(f"Embedding failed for batch {i}") from embed_e
-
-            vectors_list = vectors.tolist() if hasattr(vectors, "tolist") else [list(v) for v in vectors]
-            points_to_upsert = []
-            for vec_idx, _ in enumerate(valid_indices):
-                current_payload = payloads[vec_idx]
-                current_payload.setdefault("metadata", {}).setdefault("last_modified", time.time())
-                points_to_upsert.append(
-                    models.PointStruct(id=point_ids[vec_idx], vector=vectors_list[vec_idx], payload=current_payload)
+            if not isinstance(size_to_use, int) or size_to_use <= 0:
+                raise RuntimeError(
+                    f"Cannot clear/recreate collection: Invalid or unknown embedding dimension ({size_to_use})."
                 )
 
-            upsert_batch_size = self.config.indexing_batch_size
-            logger.debug(f"Upserting {len(points_to_upsert)} points in sub-batches of {upsert_batch_size}...")
-            for j in range(0, len(points_to_upsert), upsert_batch_size):
-                if worker_is_running_flag and not worker_is_running_flag():
-                    logger.warning("Cancellation requested during upsert.")
-                    raise InterruptedError("Upsert cancelled.")
-                sub_batch = points_to_upsert[j : j + upsert_batch_size]
+            logger.info(
+                f"Clearing index by recreating collection '{self.collection_name}' with vector size {size_to_use}."
+            )
+            if not self.recreate_collection(
+                vector_size=size_to_use
+            ):  # Pass the determined size
+                return False
+            self.vector_size = size_to_use  # Update cached vector size
+            return True
+        except Exception as e:
+            logger.error(
+                f"Failed to clear index '{self.collection_name}': {e}", exc_info=True
+            )
+            return False
+
+    def _get_worker_config(self) -> WorkerConfig:
+        """Prepares worker configuration based on the main application config."""
+        # Determine the active indexing profile or use top-level defaults
+        profile_name = getattr(
+            self.config, "indexing_profile", "default_profile"
+        )  # Ensure a fallback name
+        profile_config = getattr(self.config, profile_name, None)
+
+        # Get chunk_size: from profile, then from main config, then a hardcoded default
+        chunk_size = getattr(profile_config, "chunk_size", None)
+        if chunk_size is None:
+            chunk_size = getattr(self.config, "chunk_size", 512)
+
+        # Get chunk_overlap: from profile, then from main config, then a hardcoded default
+        chunk_overlap = getattr(profile_config, "chunk_overlap", None)
+        if chunk_overlap is None:
+            chunk_overlap = getattr(self.config, "chunk_overlap", 50)
+
+        # Get boilerplate_removal (clean_html): from profile, then from main config, then False
+        clean_html = getattr(profile_config, "boilerplate_removal", None)
+        if clean_html is None:
+            clean_html = getattr(
+                self.config, "boilerplate_removal", False
+            )  # Assuming boilerplate_removal exists on MainConfig
+
+        # Get lowercase: from main config, then False
+        lowercase = getattr(self.config, "lowercase", False)
+
+        # Get rejected_docs_foldername: from main config, then a default
+        # Ensure it's a list for file_filters
+        rejected_folder = getattr(self.config, "rejected_docs_foldername", "_rejected")
+        file_filters = [rejected_folder] if isinstance(rejected_folder, str) else []
+
+        return WorkerConfig(
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+            clean_html=bool(clean_html),
+            lowercase=bool(lowercase),
+            file_filters=file_filters,
+        )
+
+    def add_files(
+        self,
+        file_paths: List[str],
+        progress_callback: Callable[[int, int], None],
+        worker_flag: Callable[[], bool] = None,
+        worker_is_running_flag: Callable[[], bool] = None,  # Kept for compatibility
+    ) -> int:
+        """Chunk files in parallel then upsert."""
+        effective_worker_flag = (
+            worker_flag or worker_is_running_flag
+        )  # Consolidate flags
+        if effective_worker_flag and not effective_worker_flag():
+            logger.info("add_files operation cancelled before start.")
+            raise InterruptedError("Cancelled")
+
+        file_mtimes = {}
+        valid_file_paths_for_processing = []
+        for fp_str in file_paths:
+            try:
+                file_mtimes[fp_str] = os.path.getmtime(fp_str)
+                valid_file_paths_for_processing.append(fp_str)
+            except OSError as e:
+                logger.warning(f"Could not get mtime for {fp_str}, skipping: {e}")
+
+        if not valid_file_paths_for_processing:
+            if progress_callback:
+                progress_callback(len(file_paths), len(file_paths))
+            return 0
+
+        # ++ Debug print for _get_worker_config call ++
+        print(
+            f"--- In add_files. Has _get_worker_config: {hasattr(self, '_get_worker_config')} ---"
+        )
+        if hasattr(self, "_get_worker_config"):
+            print(
+                f"--- In add_files. Type of _get_worker_config: {type(self._get_worker_config)} ---"
+            )
+
+        worker_init_cfg = asdict(
+            self._get_worker_config()
+        )  # This line was causing the AttributeError
+
+        total_valid_files = len(valid_file_paths_for_processing)
+        processed_chunks: List[Dict] = []  # Renamed from 'chunks' to avoid confusion
+        failed_files = []
+
+        # Determine number of processes
+        num_processes = max(
+            1, os.cpu_count() - 1 if os.cpu_count() else 1
+        )  # Ensure at least 1
+        logger.info(
+            f"Starting multiprocessing pool with {num_processes} processes for file chunking."
+        )
+
+        with multiprocessing.Pool(
+            processes=num_processes,
+            initializer=_worker_initializer,
+            initargs=(worker_init_cfg,),  # Pass the configuration dictionary
+        ) as pool:
+            for i, result in enumerate(
+                pool.imap_unordered(
+                    _process_single_file_worker, valid_file_paths_for_processing
+                ),
+                1,  # Start enumeration from 1 for progress reporting
+            ):
+                if effective_worker_flag and not effective_worker_flag():
+                    pool.terminate()  # Stop the pool if cancelled
+                    logger.info("File processing pool terminated due to cancellation.")
+                    raise InterruptedError("Cancelled during file processing")
+
+                if result.get("error"):
+                    failed_files.append(result["file"])
+                else:
+                    source_file_path = result.get("file")
+                    mtime = file_mtimes.get(source_file_path)
+
+                    for chunk_data in result.get("chunks", []):
+                        # Ensure metadata dictionary exists
+                        chunk_data.setdefault("metadata", {})
+                        # Add conceptual 'last_modified', add_documents will map it to QDRANT_KEY_LAST_MODIFIED
+                        if (
+                            mtime is not None and QDRANT_KEY_LAST_MODIFIED
+                        ):  # Check if key is configured
+                            chunk_data["metadata"]["last_modified"] = mtime
+                        # Add conceptual 'source_filepath'
+                        if (
+                            source_file_path and QDRANT_KEY_SOURCE_FILEPATH
+                        ):  # Check if key is configured
+                            chunk_data["metadata"]["source_filepath"] = source_file_path
+
+                    processed_chunks.extend(result.get("chunks", []))
+
+                if progress_callback:
+                    progress_callback(i, total_valid_files)
+
+        if failed_files:
+            logger.warning(
+                f"Skipped {len(failed_files)} files due to errors during processing: {failed_files}"
+            )
+
+        if not processed_chunks:
+            logger.info("No chunks were produced from file processing.")
+            return 0
+
+        logger.info(f"Produced {len(processed_chunks)} chunks for indexing.")
+        return self.add_documents(
+            processed_chunks, progress_callback, effective_worker_flag
+        )
+
+    def add_documents(
+        self,
+        documents: List[Dict],  # Expects list of chunk dicts
+        progress_callback: Callable[[int, int], None] = None,
+        worker_flag: Callable[[], bool] = None,
+    ) -> int:
+        """Embed & upsert chunks in batches. If a doc_id is reused, existing vectors are deleted first."""
+        if not self.check_connection():
+            logger.error("Cannot add documents: No Qdrant connection.")
+            return 0
+        if self.model_index is None:
+            logger.error("Cannot add documents: Embedding model not available.")
+            return 0
+        if not documents:
+            logger.info("No documents provided to add_documents.")
+            return 0
+
+        M = MainConfig.METADATA_TAGS  # Qdrant key mappings
+        F = (
+            MainConfig.METADATA_INDEX_FIELDS
+        )  # Conceptual keys to include from chunk metadata
+
+        total_added = 0
+        # Ensure batch_size is at least 1, handle if config value is missing or invalid
+        batch_size = getattr(self.config, "indexing_batch_size", 32)
+        if not isinstance(batch_size, int) or batch_size <= 0:
+            logger.warning(
+                f"Invalid indexing_batch_size ({batch_size}), defaulting to 32."
+            )
+            batch_size = 32
+
+        # Step 0: Identify and delete existing chunks by doc_id (if doc_id is managed)
+        # This assumes "doc_id" is a conceptual key in M and F
+        doc_id_qdrant_key = M.get("doc_id")
+        if doc_id_qdrant_key:
+            doc_ids_to_delete = set()
+            for chunk_doc in documents:  # Iterate over chunk dictionaries
+                # chunk_doc["metadata"] should contain conceptual keys
+                chunk_metadata = chunk_doc.get("metadata", {})
+                doc_id_value = chunk_metadata.get("doc_id")  # Conceptual key
+                if doc_id_value:
+                    doc_ids_to_delete.add(doc_id_value)
+
+            if doc_ids_to_delete:
+                logger.info(
+                    f"Found {len(doc_ids_to_delete)} unique doc_ids for pre-deletion."
+                )
+                for doc_id_val in doc_ids_to_delete:
+                    try:
+                        self.client.delete(
+                            collection_name=self.collection_name,
+                            points_selector=models.FilterSelector(
+                                filter=models.Filter(
+                                    must=[
+                                        models.FieldCondition(
+                                            key=doc_id_qdrant_key,  # Use the Qdrant key
+                                            match=models.MatchValue(value=doc_id_val),
+                                        )
+                                    ]
+                                )
+                            ),
+                            wait=False,  # Can be False for speed, True for certainty
+                        )
+                        logger.debug(
+                            f"Issued delete for existing chunks with doc_id: {doc_id_val}"
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            f"Failed to delete points for doc_id='{doc_id_val}': {e}"
+                        )
+        else:
+            logger.info(
+                "doc_id metadata tag not configured; skipping pre-deletion of documents."
+            )
+
+        # Step 1: Batch encoding and indexing
+        num_documents_to_process = len(documents)
+        for i in range(0, num_documents_to_process, batch_size):
+            if worker_flag and not worker_flag():
+                logger.info("add_documents cancelled by worker_flag.")
+                raise InterruptedError("Indexing cancelled by worker_flag")
+
+            batch_of_chunks = documents[i : i + batch_size]
+            texts_for_embedding, qdrant_payloads, point_ids = [], [], []
+
+            for chunk_dict in batch_of_chunks:
+                text_to_embed = chunk_dict.get(
+                    "text_with_context", chunk_dict.get("text", "")
+                ).strip()
+
+                # Conceptual metadata from the chunk (e.g., from DataLoader)
+                conceptual_metadata = chunk_dict.get("metadata", {})
+
+                # Essential IDs for point creation
+                # chunk_id is a conceptual key, source_filepath might also be
+                raw_chunk_id = conceptual_metadata.get("chunk_id")
+
+                if not text_to_embed:
+                    logger.warning(
+                        f"Skipping chunk (ID: {raw_chunk_id}) due to empty text_to_embed."
+                    )
+                    continue
+                if not raw_chunk_id:
+                    logger.warning(
+                        f"Skipping chunk with text '{text_to_embed[:50]}...' due to missing chunk_id."
+                    )
+                    continue
+
+                # Generate Qdrant point ID (must be int or UUID string)
+                # Using UUID5 for deterministic IDs based on raw_chunk_id
+                point_uuid = uuid.uuid5(uuid.NAMESPACE_URL, str(raw_chunk_id))
+                pid = str(point_uuid)  # Use UUID string as ID for Qdrant
+
+                texts_for_embedding.append(text_to_embed)
+
+                # --- Construct Qdrant Payload ---
+                # Start with fixed/internal fields
+                current_payload = {
+                    M.get("text", "text_content"): chunk_dict.get(
+                        "text", text_to_embed
+                    ),  # Use configured text tag or default
+                    M.get("embedding_model", "embedding_model_name"): getattr(
+                        self.model_index, "model_name_or_path", "unknown"
+                    ),
+                    # "original_chunk_id": str(raw_chunk_id), # Optional: if you need the original ID separately
+                }
+
+                # Add all user-defined metadata fields from conceptual_metadata
+                # F = MainConfig.METADATA_INDEX_FIELDS (conceptual keys)
+                # M = MainConfig.METADATA_TAGS (conceptual_key -> qdrant_key)
+                for conceptual_key in F:
+                    if conceptual_key in conceptual_metadata:
+                        qdrant_key_for_field = M.get(conceptual_key)
+                        if (
+                            qdrant_key_for_field
+                            and qdrant_key_for_field not in current_payload
+                        ):
+                            current_payload[qdrant_key_for_field] = conceptual_metadata[
+                                conceptual_key
+                            ]
+                        elif not qdrant_key_for_field:
+                            logger.warning(
+                                f"No Qdrant tag mapping for conceptual key '{conceptual_key}' in METADATA_TAGS."
+                            )
+
+                qdrant_payloads.append(current_payload)
+                point_ids.append(pid)
+
+            if not texts_for_embedding:
+                if (
+                    progress_callback
+                ):  # Still call progress for empty batches to advance UI
+                    progress_callback(
+                        min(i + batch_size, num_documents_to_process),
+                        num_documents_to_process,
+                    )
+                continue
+
+            try:
+                with torch.no_grad():  # Important for inference
+                    embeddings = self.model_index.encode_documents(
+                        texts_for_embedding,
+                        show_progress_bar=False,  # Assuming SentenceTransformer interface
+                    )
+
+                # Convert to list of lists if it's a tensor/numpy array
+                if hasattr(embeddings, "tolist"):
+                    embeddings_list = embeddings.tolist()
+                elif (
+                    isinstance(embeddings, list)
+                    and embeddings
+                    and isinstance(embeddings[0], (list, tuple))
+                ):
+                    embeddings_list = [
+                        list(v) for v in embeddings
+                    ]  # Ensure inner are lists
+                else:  # Fallback for single embedding or unexpected format
+                    logger.error(
+                        f"Unexpected embedding format: {type(embeddings)}. Cannot convert to list of lists."
+                    )
+                    continue  # Skip this batch if embeddings are bad
+
+            except Exception as e:
+                logger.error(f"Failed to encode batch of documents: {e}", exc_info=True)
+                continue  # Skip this batch on encoding error
+
+            points_to_upsert = [
+                models.PointStruct(id=p_id, vector=vector, payload=payload)
+                for p_id, vector, payload in zip(
+                    point_ids, embeddings_list, qdrant_payloads
+                )
+            ]
+
+            if points_to_upsert:
                 try:
-                    upsert_result = self.client.upsert(collection_name=self.collection_name, points=sub_batch, wait=True)
-                    if upsert_result.status != models.UpdateStatus.COMPLETED:
-                         logger.warning(f"Qdrant upsert sub-batch status: {upsert_result.status}")
-                    total_added_updated += len(sub_batch)
-                except Exception as upsert_e:
-                    logger.error(f"Qdrant upsert failed for sub-batch: {upsert_e}", exc_info=True) # Log and continue
+                    # Qdrant's upsert can take a list of PointStructs
+                    # For very large batches, consider sub-batching for upsert if Qdrant has limits
+                    self.client.upsert(
+                        collection_name=self.collection_name,
+                        points=points_to_upsert,
+                        wait=True,  # Wait for operation to complete for reliability
+                    )
+                    total_added += len(points_to_upsert)
+                    logger.debug(f"Upserted {len(points_to_upsert)} points to Qdrant.")
+                except Exception as e:
+                    logger.error(
+                        f"Failed to upsert batch to Qdrant: {e}", exc_info=True
+                    )
 
-            if progress_callback: progress_callback(min(total_processed, total_documents_to_process), total_documents_to_process)
+            if progress_callback:
+                progress_callback(
+                    min(i + batch_size, num_documents_to_process),
+                    num_documents_to_process,
+                )
 
-        logger.info(f"Indexing finished. Added/Updated={total_added_updated}, Skipped={total_skipped}, Processed={total_processed}")
-        return total_added_updated
+        logger.info(f"Finished add_documents. Total points added: {total_added}")
+        return total_added
 
-    # --- Searching ---
     def search(
         self,
         query_text: str,
-        query_embedding_model: Optional[SentenceTransformer],
-        top_k: Optional[int] = None,
-        filters: Optional[Dict] = None
-    ) -> List[QdrantResult]:
-        """Embeds query and searches the index."""
-        if not self.check_connection(): logger.error("Search failed: No Qdrant connection."); return []
-        if query_embedding_model is None: raise ValueError("query_embedding_model required for search.")
-        if not query_text or not query_text.strip(): logger.warning("Search query empty."); return []
+        query_embedding_model: Any,  # Should be the PrefixAwareTransformer instance
+        top_k: int,
+        filters: Optional[Dict] = None,  # Qdrant filter dictionary
+    ) -> List[models.ScoredPoint]:
+        """Embed query then search via Qdrant. Returns raw ScoredPoint objects."""
+        if not self.check_connection():
+            logger.error("Cannot search: No Qdrant connection.")
+            return []
+        if query_embedding_model is None:
+            logger.error("Cannot search: Query embedding model not available.")
+            return []
 
-        logger.debug(f"Encoding search query: '{query_text[:100]}...'")
-        try: # Embed query
-            if not callable(getattr(query_embedding_model, "encode", None)): raise TypeError("Query model has no 'encode' method.")
+        qdrant_filter_model = None
+        if filters:
             try:
-                with torch.no_grad(): query_vector_raw = query_embedding_model.encode(query_text)
-            except RuntimeError as e: # OOM
-                if "out of memory" in str(e).lower():
-                    logger.warning("GPU OOM encoding query, retrying on CPU.")
-                    query_embedding_model.to("cpu")
-                    with torch.no_grad(): query_vector_raw = query_embedding_model.encode(query_text, device="cpu")
-                else: raise
-            query_vector_list = query_vector_raw.tolist() if hasattr(query_vector_raw, "tolist") else list(query_vector_raw)
-            if not query_vector_list or not isinstance(query_vector_list[0], (float, int)): raise TypeError("Invalid query vector.")
-        except Exception as e: logger.error(f"Query encoding failed: {e}", exc_info=True); return []
-
-        effective_top_k = max(1, top_k if top_k is not None else self.config.top_k)
-
-        # Build filter model
-        qdrant_filter_model: Optional[models.Filter] = None
-        if filters and isinstance(filters, dict) and filters:
-            must_conditions: List[models.Condition] = []
-            try:
-                for key, value in filters.items():
-                    filter_key = key if key.startswith("metadata.") else f"metadata.{key}"
-                    condition = models.FieldCondition(key=filter_key, match=models.MatchValue(value=value))
-                    must_conditions.append(condition)
-                if must_conditions:
-                    qdrant_filter_model = models.Filter(must=must_conditions)
-                    logger.debug(f"Search filter: {qdrant_filter_model.model_dump_json(indent=2)}")
-            except Exception as filter_e:
-                logger.warning(f"Filter build failed: {filter_e}. No filter applied.")
+                # Attempt to construct a Qdrant Filter model if filters are provided
+                # This depends on the structure of your 'filters' dict
+                # Example: if filters = {"must": [{"key": "city", "match": {"value": "London"}}]}
+                qdrant_filter_model = models.Filter(**filters)
+            except Exception as e:
+                logger.warning(
+                    f"Could not construct Qdrant Filter from provided dict: {e}. Searching without filter."
+                )
                 qdrant_filter_model = None
 
-        # Build search params
-        search_params_dict = self.config.qdrant.search_params
-        qdrant_search_params: Optional[models.SearchParams] = None
-        if search_params_dict and isinstance(search_params_dict, dict):
-            try:
-                 qdrant_search_params = models.SearchParams(**search_params_dict)
-                 logger.debug(f"Search params: {search_params_dict}")
-            except Exception as params_e:
-                 logger.warning(f"Invalid search_params in config: {params_e}. Ignoring.")
-                 qdrant_search_params = None
-
-        logger.debug(f"Performing Qdrant search k={effective_top_k}.")
-        try: # Perform search
-            search_result: List[models.ScoredPoint] = self.client.search(
-                collection_name=self.collection_name, query_vector=query_vector_list,
-                query_filter=qdrant_filter_model, limit=effective_top_k,
-                with_payload=True, with_vectors=False, search_params=qdrant_search_params
-            )
-            results = [QdrantResult(hit.payload, hit.score) for hit in search_result]
-            logger.info(f"Search returned {len(results)} results.")
-            return results
-        except Exception as e: logger.error(f"Qdrant search failed: {e}", exc_info=True); return []
-
-
-    def _get_worker_config(self) -> dict:
-        """
-        Creates a configuration dictionary for worker processes,
-        merging the active profile's settings into the base config.
-        """
-        if not self.config:
-            raise ValueError("Main configuration object (self.config) is not set.")
-
-        logger.debug("Preparing configuration dictionary for worker processes...")
         try:
-            # Use deepcopy to prevent modifying the instance's config
-            base_config_dict = copy.deepcopy(self.config.model_dump(mode='python'))
-        except Exception as e:
-             logger.error(f"Failed to dump base config: {e}", exc_info=True)
-             raise RuntimeError("Config dump failed") from e
-
-        active_profile_name = self.config.indexing_profile # e.g., "normal"
-
-        # --- CORRECTED PROFILE ACCESS ---
-        # Access the nested profile model object directly using its attribute name
-        profile_config_obj = None
-        if hasattr(self.config, active_profile_name):
-            profile_config_obj = getattr(self.config, active_profile_name)
-        # --- END CORRECTION ---
-
-        profile_settings_dict = {}
-        if profile_config_obj:
-            # Ensure it's a Pydantic model before trying to dump
-            if hasattr(profile_config_obj, 'model_dump'):
-                try:
-                    profile_settings_dict = profile_config_obj.model_dump(mode='python')
-                    logger.info(f"Applying settings from profile '{active_profile_name}': {list(profile_settings_dict.keys())}")
-                    # Merge profile settings into the base config dict
-                    base_config_dict.update(profile_settings_dict)
-                except Exception as e:
-                    logger.warning(f"Could not dump profile settings for '{active_profile_name}': {e}. Using base config values.")
+            # Use the specific query encoding method
+            if hasattr(query_embedding_model, "encode_query"):
+                query_vector = query_embedding_model.encode_query(query_text)
+            elif hasattr(
+                query_embedding_model, "encode"
+            ):  # Fallback if only generic encode exists
+                query_vector = query_embedding_model.encode(query_text)
             else:
-                 logger.warning(f"Attribute '{active_profile_name}' found but is not a Pydantic model. Using base config values.")
-        else:
-            # This warning should no longer appear if config structure matches example
-            logger.warning(f"Indexing profile attribute '{active_profile_name}' not found in config object. Using base config values.")
+                raise RuntimeError(
+                    f"Query embedding model {type(query_embedding_model)} has no 'encode_query' or 'encode' method."
+                )
 
-        # Add derived/runtime settings needed by worker's DataLoader
-        if hasattr(self.dataloader, 'max_seq_length'):
-            base_config_dict['embedding_model_max_seq_length'] = self.dataloader.max_seq_length
-        else:
-             base_config_dict['embedding_model_max_seq_length'] = DEFAULT_MAX_SEQ_LENGTH # Use default
+            if hasattr(
+                query_vector, "tolist"
+            ):  # Convert to list if it's a tensor/numpy array
+                query_vector = query_vector.tolist()
 
-        # Remove original nested profile objects before pickling if they cause issues
-        base_config_dict.pop('normal', None)
-        base_config_dict.pop('intense', None)
+            if not isinstance(query_vector, list) or (
+                query_vector and not isinstance(query_vector[0], float)
+            ):
+                raise ValueError(
+                    "Query vector is not in the expected list-of-floats format."
+                )
 
-        return base_config_dict
-    
+        except Exception as e:
+            logger.error(
+                f"Failed to encode query '{query_text[:50]}...': {e}", exc_info=True
+            )
+            return []
+
+        try:
+            hits = self.client.search(
+                collection_name=self.collection_name,
+                query_vector=query_vector,
+                limit=top_k,
+                query_filter=qdrant_filter_model,  # Pass the constructed Filter model or None
+                with_payload=True,  # Usually you want the payload
+            )
+            return hits
+        except Exception as e:
+            logger.error(f"Qdrant search failed: {e}", exc_info=True)
+            return []
+
+    def get_document_by_filepath(self, filepath: str) -> Optional[Dict]:
+        """
+        Retrieve a single document's payload by exact file path.
+        Assumes 'source_filepath' is a configured metadata tag.
+        """
+        if not self.check_connection():
+            logger.error("Qdrant connection unavailable in get_document_by_filepath.")
+            return None
+
+        if QDRANT_KEY_SOURCE_FILEPATH is None:
+            logger.error(
+                "QDRANT_KEY_SOURCE_FILEPATH is not configured. Cannot get document by filepath."
+            )
+            return None
+
+        try:
+            # Use a dummy vector for metadata-only search if vector_size is known
+            # If vector_size is unknown, this search might be less efficient or require specific Qdrant config
+            dummy_vector_list: Optional[List[float]] = None
+            current_vector_size = self.vector_size or self._get_embedding_dim()
+            if current_vector_size > 0:
+                dummy_vector_list = [0.0] * current_vector_size
+            else:
+                logger.warning(
+                    "Cannot create dummy vector for filepath search: vector size unknown or invalid."
+                )
+                # Depending on Qdrant version, searching with only a filter might be possible
+                # For now, proceed without a vector if size is unknown, Qdrant might handle it or error.
+
+            results = self.client.search(
+                collection_name=self.collection_name,
+                query_vector=dummy_vector_list,  # Pass None if dummy_vector_list is None
+                query_filter=models.Filter(
+                    must=[
+                        models.FieldCondition(
+                            key=QDRANT_KEY_SOURCE_FILEPATH,  # Use the mapped Qdrant key
+                            match=models.MatchValue(value=filepath),
+                        )
+                    ]
+                ),
+                limit=1,  # We expect at most one document (or its first chunk)
+                with_payload=True,
+                with_vectors=False,  # No need for vectors here
+            )
+            if results:
+                logger.debug(f"Found metadata for {filepath}")
+                return results[0].payload  # Return the payload of the first hit
+            else:
+                logger.info(f"No document found with source_filepath: {filepath}")
+        except Exception as e:
+            logger.warning(
+                f"get_document_by_filepath failed for {filepath}: {e}", exc_info=True
+            )
+        return None
+
+    def get_vector_count(self) -> int:
+        """Returns the number of vectors in the collection."""
+        # The filter for excluding the dummy point is still commented out from previous debugging.
+        # If you re-enable it, ensure "is_dummy" is the correct key in the dummy point's payload.
+        if not self.check_connection():
+            logger.error("Cannot get vector count: No Qdrant connection.")
+            return 0  # Return 0 or raise error, depending on desired behavior
+
+        try:
+            count_response = self.client.count(
+                collection_name=self.collection_name,
+                exact=True,  # Use exact=True for precise count
+                # filter=models.Filter( # Example: Re-enable if dummy point (ID 0) should be excluded
+                #     must_not=[
+                #         models.FieldCondition(
+                #             key="is_dummy", # This key must exist in the dummy point's payload
+                #             match=models.MatchValue(value=True)
+                #         )
+                #     ]
+                # ),
+            )
+            return count_response.count
+        except Exception as e:
+            logger.error(
+                f"Failed to get vector count from Qdrant for collection '{self.collection_name}': {e}",
+                exc_info=True,
+            )
+            # Depending on strictness, you might re-raise or return a specific error indicator (e.g., -1)
+            return 0  # Returning 0 on error for now
+
+    def get_index_fingerprint(self) -> Optional[Dict[str, Any]]:
+        """
+        Retrieve fingerprint metadata (embedding model name, dim, etc.) from point ID 0.
+        """
+        if not self.check_connection():
+            logger.error("Qdrant connection unavailable in get_index_fingerprint.")
+            return None
+
+        try:
+            # Point ID 0 is conventionally used for the fingerprint
+            results = self.client.retrieve(
+                collection_name=self.collection_name,
+                ids=[0],  # Assuming fingerprint is at ID 0 (integer)
+                with_payload=True,
+                with_vectors=False,
+            )
+            if results and results[0].payload:  # Check if point exists and has payload
+                payload = results[0].payload
+                # Ensure keys exist in the payload to avoid KeyErrors
+                return {
+                    "embedding_model_name": payload.get("embedding_model_name"),
+                    "embedding_model_dim": payload.get("embedding_model_dim"),
+                    "embedding_model_fingerprint": payload.get(
+                        "embedding_model_fingerprint"
+                    ),
+                    "is_dummy": payload.get(
+                        "is_dummy"
+                    ),  # Also retrieve this if used in filters
+                }
+            else:
+                logger.info(
+                    f"No fingerprint found at point ID 0 in collection '{self.collection_name}'."
+                )
+                return None  # No fingerprint found
+        except Exception as e:
+            # This can happen if point 0 doesn't exist or other Qdrant errors
+            logger.warning(
+                f"get_index_fingerprint failed for collection '{self.collection_name}': {e}",
+                exc_info=False,
+            )  # Log less verbosely
+            return None
+
     def rebuild_index(
         self,
         progress_callback: Optional[Callable[[int, int], None]] = None,
-        worker_is_running_flag: Optional[Callable[[], bool]] = None
+        worker_flag: Optional[Callable[[], bool]] = None,
     ) -> int:
-        """Deletes, recreates, and indexes all files using parallel preprocessing."""
         logger.warning(f"--- Starting FULL rebuild of '{self.collection_name}' ---")
-        if not self.check_connection(): raise RuntimeError("Qdrant connection unavailable.")
-        if not self.dataloader: logger.error("DataLoader unavailable."); return 0
 
-        logger.info("Clearing existing index...")
-        if not self.clear_index(): logger.error("Clear index failed. Aborting rebuild."); return 0
+        if worker_flag and not worker_flag():
+            logger.info("Rebuild cancelled before start.")
+            return 0
 
-        # Gather files
-        data_dir = Path(self.config.data_directory); all_files = []
-        if data_dir.is_dir():
-            logger.info(f"Scanning {data_dir} for files...")
-            for item in data_dir.rglob("*"):
-                 if worker_is_running_flag and not worker_is_running_flag(): raise InterruptedError("Scan cancelled.")
-                 if item.is_file() and not item.name.startswith("."): all_files.append(str(item.resolve()))
-            logger.info(f"Found {len(all_files)} files.")
-        else: logger.warning(f"Data directory '{data_dir}' not found.")
-        if not all_files: logger.info("No files found to index."); return 0
+        if not self.check_connection():
+            logger.error("Cannot rebuild index: Qdrant connection unavailable.")
+            raise RuntimeError("Qdrant connection unavailable.")
 
-        total_files_to_process = len(all_files)
-        all_chunks_to_index: List[Dict] = []
-        processed_count = 0
-        num_processes = max(1, (os.cpu_count() or 4) - 1)
-        logger.info(f"Starting parallel file processing with {num_processes} workers...")
+        if not self.dataloader:
+            logger.error("DataLoader unavailable; aborting rebuild.")
+            return 0
 
-        try: worker_config_dict = self._get_worker_config()
-        except Exception as cfg_e: logger.error(f"Worker config prep failed: {cfg_e}"); raise
-
-        process_func = partial(_process_single_file_worker, worker_config_dict=worker_config_dict)
-        if progress_callback: progress_callback(0, total_files_to_process)
-
-        try: # Multiprocessing Pool execution
-            with multiprocessing.Pool(processes=num_processes) as pool:
-                results_iterator = pool.imap_unordered(process_func, all_files)
-                for file_result_chunk_list in results_iterator:
-                    if worker_is_running_flag and not worker_is_running_flag():
-                        pool.terminate(); pool.join()
-                        raise InterruptedError("Rebuild cancelled during pool execution.")
-                    all_chunks_to_index.extend(file_result_chunk_list)
-                    processed_count += 1
-                    if progress_callback: progress_callback(processed_count, total_files_to_process)
-        except InterruptedError as ie: logger.warning(f"Rebuild pool interrupted: {ie}"); raise
-        except Exception as pool_e: logger.error(f"Rebuild pool error: {pool_e}", exc_info=True); raise
-
-        logger.info(f"Parallel processing finished. Collected {len(all_chunks_to_index)} chunks.")
-
-        total_chunks_added = 0
-        if all_chunks_to_index:
-            logger.info(f"Starting final embedding and upsert of {len(all_chunks_to_index)} chunks...")
-            total_chunks_added = self.add_documents(
-                documents=all_chunks_to_index, progress_callback=progress_callback,
-                worker_is_running_flag=worker_is_running_flag
+        if not self.model_index or not hasattr(
+            self.model_index, "get_sentence_embedding_dimension"
+        ):
+            logger.error(
+                "Embedding model or its dimension getter is not available; aborting rebuild."
             )
-        else: logger.warning("No valid chunks collected.")
+            return 0
 
-        logger.warning(f"Rebuild complete. Added {total_chunks_added} chunks.")
-        return total_chunks_added
+        model_dim = self.model_index.get_sentence_embedding_dimension()
+        if not isinstance(model_dim, int) or model_dim <= 0:
+            logger.error(
+                f"Invalid embedding dimension ({model_dim}) from model; aborting rebuild."
+            )
+            raise RuntimeError(
+                "Cannot rebuild index with invalid embedding model dimension."
+            )
+
+        if not self.recreate_collection(vector_size=model_dim):
+            logger.error("Failed to recreate collection during rebuild; aborting.")
+            return 0  # Or raise an error
+
+        # Store fingerprint (dummy point with metadata)
+        model_name = getattr(self.model_index, "model_name_or_path", "unknown")
+        fingerprint_str_to_hash = f"{model_name}:{model_dim}"
+        fingerprint_hash = hashlib.md5(fingerprint_str_to_hash.encode()).hexdigest()[:8]
+
+        dummy_payload = {
+            "embedding_model_name": model_name,
+            "embedding_model_dim": model_dim,
+            "embedding_model_fingerprint": fingerprint_hash,
+            "is_dummy": True,  # Important for potential exclusion in counts
+        }
+        # Dummy vector must match model_dim
+        dummy_vector = [0.0] * model_dim
+        # Point ID 0 is used by convention for the fingerprint
+        dummy_point_id = 0  # Use integer ID
+
+        try:
+            self.client.upsert(
+                collection_name=self.collection_name,
+                points=[
+                    models.PointStruct(
+                        id=dummy_point_id, vector=dummy_vector, payload=dummy_payload
+                    )
+                ],
+                wait=True,
+            )
+            logger.info(
+                f"Stored index fingerprint: model='{model_name}', dim={model_dim}, hash='{fingerprint_hash}'"
+            )
+        except Exception as e:
+            logger.error(f"Failed to store index fingerprint: {e}", exc_info=True)
+            # Decide if this is a critical failure for the rebuild
+            # For now, log and continue, but fingerprint checks might fail later.
+
+        data_dir = Path(self.config.data_directory)
+        if not data_dir.is_dir():
+            logger.warning(
+                f"Data directory '{data_dir}' does not exist. Rebuild will process no files."
+            )
+            all_files = []
+        else:
+            all_files = [
+                str(p.resolve())
+                for p in data_dir.rglob("*")
+                if p.is_file()
+                and not p.name.startswith(".")  # Basic filter for hidden files
+            ]
+
+        if not all_files:
+            logger.info("No files found in data directory to reindex.")
+            if progress_callback:
+                progress_callback(0, 0)  # Indicate completion with no items
+            return 0
+
+        logger.info(f"Reindexing {len(all_files)} files from scratch...")
+        return self.add_files(
+            all_files, progress_callback=progress_callback, worker_flag=worker_flag
+        )
 
     def refresh_index(
         self,
-        progress_callback: Optional[Callable[[int, int], None]] = None,
-        worker_is_running_flag: Optional[Callable[[], bool]] = None
+        progress_callback: Callable[[int, int], None] = None,
+        worker_flag: Callable[[], bool] = None,
     ) -> int:
-        """Refreshes the index by processing only new or modified files using parallel workers."""
-        logger.info("Starting index refresh operation...")
-        if not self.check_connection(): raise RuntimeError("Qdrant connection unavailable.")
-        if not self.dataloader: logger.error("DataLoader unavailable."); return 0
+        logger.info(f"--- Starting refresh of '{self.collection_name}' ---")
 
-        try:
-            # --- Steps 1-3: Gather local files, Fetch indexed times, Determine files_to_process ---
-            data_dir = Path(self.config.data_directory)
-            if not data_dir.is_dir(): logger.warning(f"Data directory '{data_dir}' not found."); return 0
-            logger.info(f"Scanning {data_dir} for local files...")
-            local_files_map = {} # Populate map: {resolved_path: mtime}
-            for path in data_dir.rglob("*"):
-                 if worker_is_running_flag and not worker_is_running_flag(): raise InterruptedError("Scan cancelled.")
-                 if path.is_file() and not path.name.startswith("."):
-                     try: local_files_map[str(path.resolve())] = path.stat().st_mtime
-                     except Exception as stat_err: logger.warning(f"Stat failed for {path}: {stat_err}")
-            logger.info(f"Found {len(local_files_map)} local files.")
-
-            logger.info("Fetching indexed timestamps from Qdrant...")
-            indexed_docs = {} # Populate map: {resolved_path: latest_mtime_in_index}
-            next_page_offset = None; scroll_limit = 1000
-            payload_fields = ["metadata.source_filepath", "metadata.last_modified"] # Older API
-            # payload_selector = models.WithPayloadSelector(...) # Newer API
-            while True: # Scroll loop
-                if worker_is_running_flag and not worker_is_running_flag(): raise InterruptedError("Scroll cancelled.")
-                response, next_page_offset = self.client.scroll(
-                    collection_name=self.collection_name, limit=scroll_limit, offset=next_page_offset,
-                    with_payload=payload_fields, with_vectors=False # Adjust payload arg per API version
-                )
-                for hit in response:
-                     if worker_is_running_flag and not worker_is_running_flag(): raise InterruptedError("Scroll processing cancelled.")
-                     payload = hit.payload; metadata = payload.get("metadata", {})
-                     filepath = metadata.get("source_filepath"); last_mod = metadata.get("last_modified")
-                     if filepath and isinstance(filepath, str) and isinstance(last_mod, (int, float)):
-                         indexed_docs[filepath] = max(indexed_docs.get(filepath, 0.0), float(last_mod))
-                if next_page_offset is None: break
-            logger.info(f"Found timestamps for {len(indexed_docs)} indexed filepaths.")
-
-            files_to_process = [] # Determine files where local_mtime > indexed_mtime
-            for fp, mt in local_files_map.items():
-                if mt > indexed_docs.get(fp, 0.0): files_to_process.append(fp)
-            if not files_to_process: logger.info("Index up-to-date."); return 0
-            # --- End Steps 1-3 ---
-
-            # --- Step 4: Prepare Worker Config and Parallel Processing ---
-            total_files_to_process = len(files_to_process)
-            logger.info(f"Found {total_files_to_process} files requiring refresh. Starting parallel processing...")
-            all_new_chunks_dicts: List[Dict] = []
-            processed_count = 0
-            num_processes = max(1, (os.cpu_count() or 4) - 1)
-            logger.info(f"Using multiprocessing.Pool with {num_processes} workers.")
-
-            try: worker_config_dict = self._get_worker_config()
-            except Exception as cfg_e: logger.error(f"Worker config prep failed: {cfg_e}"); raise
-
-            process_func = partial(_process_single_file_worker, worker_config_dict=worker_config_dict)
-            if progress_callback: progress_callback(0, total_files_to_process)
-
-            try: # Multiprocessing Pool execution
-                with multiprocessing.Pool(processes=num_processes) as pool:
-                    results_iterator = pool.imap_unordered(process_func, files_to_process)
-                    for file_result_chunk_list in results_iterator:
-                        if worker_is_running_flag and not worker_is_running_flag():
-                            pool.terminate(); pool.join()
-                            raise InterruptedError("Refresh cancelled during pool execution.")
-                        all_new_chunks_dicts.extend(file_result_chunk_list)
-                        processed_count += 1
-                        if progress_callback: progress_callback(processed_count, total_files_to_process)
-            except InterruptedError as ie: logger.warning(f"Refresh pool interrupted: {ie}"); raise
-            except Exception as pool_e: logger.error(f"Refresh pool error: {pool_e}", exc_info=True); raise
-
-            logger.info(f"Parallel processing finished. Collected {len(all_new_chunks_dicts)} chunks.")
-            # --- End Step 4 ---
-
-            # --- Step 5: Upsert Collected Chunks ---
-            total_chunks_added_updated = 0
-            if all_new_chunks_dicts:
-                logger.info(f"Adding/Updating {len(all_new_chunks_dicts)} collected chunks...")
-                total_chunks_added_updated = self.add_documents(
-                    documents=all_new_chunks_dicts, progress_callback=None,
-                    worker_is_running_flag=worker_is_running_flag
-                )
-            else: logger.info("No new chunks generated.")
-            # --- End Step 5 ---
-
-        except InterruptedError as cancel:
-            logger.warning(f"Index refresh cancelled: {cancel}")
+        if worker_flag and not worker_flag():
+            logger.info("Refresh cancelled before start.")
             return 0
+
+        if not self.check_connection():
+            logger.error("Cannot refresh index: Qdrant connection unavailable.")
+            return 0  # Or raise
+
+        if not self.dataloader:
+            logger.error("DataLoader unavailable; aborting refresh.")
+            return 0
+
+        if not self.model_index or not hasattr(
+            self.model_index, "get_sentence_embedding_dimension"
+        ):
+            logger.error(
+                "Embedding model or its dimension getter is not available; aborting refresh."
+            )
+            return 0
+
+        # Verify model dimension compatibility with the existing collection
+        model_dim = self.model_index.get_sentence_embedding_dimension()
+        if not isinstance(model_dim, int) or model_dim <= 0:
+            logger.error(
+                f"Invalid embedding dimension ({model_dim}) from model; aborting refresh."
+            )
+            raise RuntimeError(
+                "Cannot refresh index: invalid embedding model dimension."
+            )
+
+        if self.vector_size is None:  # If not cached, try to get it from Qdrant
+            try:
+                collection_info = self.client.get_collection(self.collection_name)
+                # Re-apply logic from _connect_and_setup to get vector_size
+                if (
+                    hasattr(collection_info, "vectors_config")
+                    and collection_info.vectors_config is not None
+                ):
+                    if isinstance(collection_info.vectors_config, dict):
+                        default_vec_name = next(iter(collection_info.vectors_config))
+                        self.vector_size = collection_info.vectors_config[
+                            default_vec_name
+                        ].size
+                    else:
+                        self.vector_size = collection_info.vectors_config.size
+                elif (
+                    hasattr(collection_info, "config")
+                    and hasattr(collection_info.config, "params")
+                    and hasattr(collection_info.config.params, "vectors")
+                    and collection_info.config.params.vectors is not None
+                ):
+                    if isinstance(collection_info.config.params.vectors, dict):
+                        default_vec_name = next(
+                            iter(collection_info.config.params.vectors)
+                        )
+                        self.vector_size = collection_info.config.params.vectors[
+                            default_vec_name
+                        ].size
+                    else:
+                        self.vector_size = collection_info.config.params.vectors.size
+                else:
+                    logger.error(
+                        "Could not determine existing collection's vector size during refresh."
+                    )
+                    # This is a critical issue for refresh, as we can't compare dimensions.
+                    raise RuntimeError(
+                        "Failed to get collection vector size for refresh."
+                    )
+
+            except Exception as e:
+                logger.error(
+                    f"Failed to get collection info during refresh: {e}", exc_info=True
+                )
+                raise RuntimeError(f"Failed to get collection info for refresh: {e}")
+
+        if self.vector_size != model_dim:
+            logger.error(
+                f"Embedding dimension mismatch: model={model_dim}, index={self.vector_size}. Refresh aborted. Consider rebuilding."
+            )
+            raise RuntimeError(
+                f"Embedding dimension mismatch: model={model_dim}, index={self.vector_size}. Refresh aborted."
+            )
+
+        # Check for QDRANT_KEY_LAST_MODIFIED and QDRANT_KEY_SOURCE_FILEPATH
+        if not QDRANT_KEY_LAST_MODIFIED or not QDRANT_KEY_SOURCE_FILEPATH:
+            logger.error(
+                "last_modified or source_filepath tags not configured in METADATA_TAGS. Cannot perform refresh."
+            )
+            return 0
+
+        data_dir = Path(self.config.data_directory)
+        if not data_dir.is_dir():
+            logger.warning(
+                f"Data directory '{data_dir}' does not exist. Refresh will find no local files."
+            )
+            local_files_mtimes = {}
+        else:
+            local_files_mtimes = {
+                str(p.resolve()): p.stat().st_mtime
+                for p in data_dir.rglob("*")
+                if p.is_file() and not p.name.startswith(".")
+            }
+
+        indexed_files_mtimes = {}
+        current_offset = None  # Qdrant scroll offset can be a string or int depending on version/type
+
+        logger.info("Scrolling through indexed documents to get modification times...")
+        scroll_limit = 250  # Adjust as needed, smaller can be safer for large payloads
+
+        while True:
+            if worker_flag and not worker_flag():
+                logger.info("Refresh cancelled during scroll.")
+                raise InterruptedError("Cancelled during scroll")
+            try:
+                scroll_response, next_page_offset = self.client.scroll(
+                    collection_name=self.collection_name,
+                    limit=scroll_limit,
+                    offset=current_offset,
+                    with_payload=[
+                        QDRANT_KEY_SOURCE_FILEPATH,  # Use direct Qdrant key
+                        QDRANT_KEY_LAST_MODIFIED,  # Use direct Qdrant key
+                    ],
+                    with_vectors=False,  # No need for vectors
+                )
+
+                if not scroll_response:  # No more points
+                    break
+
+                for hit in scroll_response:
+                    payload = hit.payload  # This is the flat Qdrant payload
+                    if payload:  # Ensure payload is not None
+                        filepath = payload.get(QDRANT_KEY_SOURCE_FILEPATH)
+                        last_modified_time = payload.get(QDRANT_KEY_LAST_MODIFIED)
+
+                        if filepath and last_modified_time is not None:
+                            try:
+                                # Ensure last_modified_time is float for comparison
+                                indexed_files_mtimes[filepath] = max(
+                                    indexed_files_mtimes.get(filepath, 0.0),
+                                    float(last_modified_time),
+                                )
+                            except ValueError:
+                                logger.warning(
+                                    f"Could not convert last_modified_time '{last_modified_time}' to float for {filepath}"
+                                )
+
+                if next_page_offset is None:  # End of scroll
+                    break
+                current_offset = next_page_offset
+            except Exception as e:
+                logger.error(
+                    f"Error during Qdrant scroll operation: {e}", exc_info=True
+                )
+                # Decide how to handle scroll errors: break, retry, or raise
+                break  # For now, break on error
+
+        files_to_process = []
+        for fp, mtime in local_files_mtimes.items():
+            indexed_mtime = indexed_files_mtimes.get(fp)
+            if indexed_mtime is None or mtime > indexed_mtime:
+                files_to_process.append(fp)
+
+        logger.info(
+            f"Found {len(files_to_process)} files to refresh/add out of {len(local_files_mtimes)} local files."
+        )
+
+        if not files_to_process:
+            if progress_callback:
+                progress_callback(0, 0)  # Indicate completion with no items
+            logger.info("No files need refreshing.")
+            return 0
+
+        if progress_callback:  # Initial progress update
+            progress_callback(0, len(files_to_process))
+
+        return self.add_files(files_to_process, progress_callback, worker_flag)
+
+    def _get_embedding_dim(self) -> int:
+        """
+        Infers embedding dimension from the model_index.
+        Returns -1 on failure.
+        """
+        if not self.model_index:
+            logger.error("No model_index available to infer embedding dimension.")
+            return -1
+
+        # Prefer the model's own method if available
+        if hasattr(self.model_index, "get_sentence_embedding_dimension"):
+            try:
+                dim = self.model_index.get_sentence_embedding_dimension()
+                if isinstance(dim, int) and dim > 0:
+                    return dim
+                else:
+                    logger.warning(
+                        f"model_index.get_sentence_embedding_dimension() returned invalid: {dim}"
+                    )
+            except Exception as e:
+                logger.warning(
+                    f"Error calling model_index.get_sentence_embedding_dimension(): {e}"
+                )
+
+        # Fallback to encoding a dummy sentence
+        logger.info(
+            "Falling back to dummy sentence encoding for dimension check (in _get_embedding_dim)."
+        )
+        try:
+            sample_text = ["test sentence for dimension"]
+            # Determine the correct encoding method
+            if hasattr(self.model_index, "encode_documents"):
+                encode_fn = self.model_index.encode_documents
+            elif hasattr(self.model_index, "encode"):
+                encode_fn = self.model_index.encode
+            else:
+                logger.error(
+                    "Model_index has no 'encode_documents' or 'encode' method."
+                )
+                return -1
+
+            with torch.no_grad():  # Ensure no gradient calculations
+                # Pass common arguments if encode_fn expects them (e.g., from SentenceTransformer)
+                try:
+                    embeddings = encode_fn(sample_text, show_progress_bar=False)
+                except TypeError:  # Try without show_progress_bar if it's not accepted
+                    embeddings = encode_fn(sample_text)
+
+            if (
+                hasattr(embeddings, "shape") and len(embeddings.shape) > 1
+            ):  # For batch output (e.g., numpy array, tensor)
+                return embeddings.shape[-1]
+            elif (
+                isinstance(embeddings, list)
+                and embeddings
+                and isinstance(embeddings[0], (list, tuple))
+                and embeddings[0]
+            ):  # For list of lists
+                return len(embeddings[0])
+            elif (
+                isinstance(embeddings, list)
+                and embeddings
+                and isinstance(embeddings[0], float)
+            ):  # For single sentence returning list of floats
+                return len(embeddings)
+            else:
+                logger.error(
+                    f"Could not determine embedding dimension from dummy encode result type: {type(embeddings)}"
+                )
+                return -1
         except Exception as e:
-            logger.error(f"Error during refresh operation: {e}", exc_info=True)
-            raise # Re-raise other errors
-
-        logger.info(f"Refresh complete. Added/Updated {total_chunks_added_updated} chunks. Processed {processed_count} files.")
-        return total_chunks_added_updated
-
-# --- END OF FILE scripts/indexing/qdrant_index_manager.py ---
+            logger.error(
+                f"Failed to infer embedding dimension via dummy encode: {e}",
+                exc_info=True,
+            )
+            return -1

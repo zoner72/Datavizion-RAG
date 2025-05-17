@@ -39,9 +39,9 @@ DATA_REBUILD_INDEX_BUTTON = "Rebuild Index (All Files)"
 DATA_IMPORT_LOG_BUTTON = "Download PDFs from Log File"
 
 # Dialogs
-DIALOG_WARNING_TITLE = "Warning"      
-DIALOG_ERROR_TITLE = "Error"          
-DIALOG_INFO_TITLE = "Information"     
+DIALOG_WARNING_TITLE = "Warning"
+DIALOG_ERROR_TITLE = "Error"
+DIALOG_INFO_TITLE = "Information"
 DIALOG_CONFIRM_TITLE = "Confirm"
 DIALOG_PROGRESS_TITLE = "Progress"
 
@@ -52,7 +52,9 @@ DIALOG_ERROR_FILE_COPY = "Copy Fail '{filename}': {e}"
 DIALOG_WARNING_MISSING_URL = "Enter Website URL."
 DIALOG_WARNING_SELECT_WEBSITE = "Select website row."
 DIALOG_WARNING_CANNOT_CHECK_QDRANT = "Qdrant connect fail. Status unknown."
-DIALOG_WARNING_PDF_LOG_MISSING = "PDF log missing for {url}. Scrape text first?\nPath: {log_path}"
+DIALOG_WARNING_PDF_LOG_MISSING = (
+    "PDF log missing for {url}. Scrape text first?\nPath: {log_path}"
+)
 
 # Info Messages
 DIALOG_INFO_NO_LOGS_FOUND = "No JSON logs found."
@@ -74,7 +76,9 @@ DIALOG_INFO_PDF_INDEX_STARTED = "PDF index started: {url}"
 DIALOG_INFO_PDF_INDEX_COMPLETE = "PDF index complete: {url}."
 DIALOG_INFO_DOC_ADD_STARTED = "Indexing local doc(s)..."
 DIALOG_INFO_DOC_ADD_COMPLETE = "Local doc index done: {filenames}"
-DIALOG_INFO_WEBSITE_CONFIG_DELETED = "Config entry removed for: {url}. (Qdrant data NOT deleted)"
+DIALOG_INFO_WEBSITE_CONFIG_DELETED = (
+    "Config entry removed for: {url}. (Qdrant data NOT deleted)"
+)
 
 # PDF Log
 DIALOG_SELECT_DOC_TITLE = "Add Local Documents"

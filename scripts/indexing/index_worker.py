@@ -1,36 +1,72 @@
 # File: scripts/ingest/index_worker.py
 
-import traceback
+import json
 import logging
-from typing import NamedTuple, List, Optional, Dict
+import traceback
+from pathlib import Path
+from typing import Any, Dict, List, NamedTuple, Optional
 
-from config_models import MainConfig
+from scripts.indexing.worker_config import WorkerConfig
 from scripts.ingest.data_loader import DataLoader, RejectedFileError
 
 logger = logging.getLogger(__name__)
 
+
 class FileResult(NamedTuple):
     success: bool
     file_path: str
-    chunks: List[Dict]       # empty if rejected or error
-    error: Optional[str]     # None on success or rejection
+    chunks: List[Dict]  # empty if rejected or error
+    error: Optional[str]  # None on success or rejection
 
-def process_single_file_wrapper(file_path: str, config: MainConfig) -> FileResult:
-    """
-    Processes a single file path. Returns FileResult with:
-      - success=True and chunks on normal processing
-      - success=False, no error and empty chunks on RejectedFileError
-      - success=False, error message on unexpected exceptions
-    """
+
+def _process_single_file_worker(cfg: WorkerConfig, filepath: str, out_queue: Any):
+    from config_models import MainConfig
+
+    loader = DataLoader()
     try:
-        dataloader = DataLoader(config)
-        chunks = dataloader.load_and_preprocess_file(file_path)
-        # chunks: List[Tuple[file, chunk_dict]] -> if you want only dicts, you can flatten here
-        return FileResult(True, file_path, chunks, None)
-    except RejectedFileError:
-        logger.info(f"Rejected (unsupported or filtered) file: {file_path}")
-        return FileResult(False, file_path, [], None)
+        # Load metadata sidecar if present
+        meta_path = filepath + ".meta.json"
+        file_metadata: Dict[str, Any] = {}
+        if Path(meta_path).is_file():
+            try:
+                with open(meta_path, "r", encoding="utf-8") as f:
+                    file_metadata = json.load(f)
+            except Exception as e:
+                logger.warning(f"Could not read sidecar metadata for {filepath}: {e}")
+
+        # Process file
+        chunks = loader.load_and_preprocess_file(
+            filepath,
+            chunk_size=cfg.chunk_size,
+            chunk_overlap=cfg.chunk_overlap,
+            clean_html=cfg.clean_html,
+            lowercase=cfg.lowercase,
+            file_filters=cfg.file_filters,
+        )
+
+        # Inject sidecar metadata into each chunk
+        if file_metadata:
+            M = MainConfig.METADATA_TAGS
+            F = MainConfig.METADATA_INDEX_FIELDS
+
+            for _, chunk in chunks:
+                md = chunk.setdefault("metadata", {})
+                for key in F:
+                    tag = M.get(key)
+                    if tag and key in file_metadata and tag not in md:
+                        md[tag] = file_metadata[key]
+
+        out_queue.put(
+            FileResult(success=True, file_path=filepath, chunks=chunks, error=None)
+        )
+
+    except RejectedFileError as e:
+        out_queue.put(
+            FileResult(success=False, file_path=filepath, chunks=[], error=str(e))
+        )
     except Exception as e:
-        tb = traceback.format_exc()
-        logger.error(f"Error processing {file_path}: {e}\n{tb}")
-        return FileResult(False, file_path, [], str(e))
+        logger.error(f"Indexing failed for {filepath}: {e}")
+        traceback.print_exc()
+        out_queue.put(
+            FileResult(success=False, file_path=filepath, chunks=[], error=str(e))
+        )

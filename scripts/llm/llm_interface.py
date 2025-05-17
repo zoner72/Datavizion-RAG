@@ -59,6 +59,7 @@ except Exception as e:
 logging.info(f"LLM Interface using device: {DEVICE}")
 
 
+# In scripts/llm/llm_interface.py
 def _parse_sse_stream(response, partial_callback: Optional[Callable[[str], None]]):
     """
     Unified SSE parser for OpenAI-style streams.
@@ -80,8 +81,13 @@ def _parse_sse_stream(response, partial_callback: Optional[Callable[[str], None]
             if chunk:
                 complete += chunk
                 if partial_callback:
-                    partial_callback(chunk)
-        except Exception:
+                    try:
+                        partial_callback(chunk)
+                    except Exception as cb_err:
+                        logger.error(
+                            f"Error in partial_callback: {cb_err}", exc_info=True
+                        )
+        except Exception:  # Keep general exception for JSON parsing etc.
             continue
     return complete
 

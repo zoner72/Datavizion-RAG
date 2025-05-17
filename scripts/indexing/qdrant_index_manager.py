@@ -15,16 +15,11 @@ from httpx import ConnectError, ReadTimeout
 from qdrant_client import QdrantClient, models
 from qdrant_client.http.exceptions import ResponseHandlingException, UnexpectedResponse
 
-from config_models import MainConfig
+from config_models import MainConfig, QdrantConfig
 from scripts.ingest.data_loader import DataLoader, RejectedFileError
 
 logger = logging.getLogger(__name__)
 
-# --- Define Qdrant keys for specific metadata fields based on MainConfig ---
-# These will be the actual keys used when storing and retrieving from Qdrant's payload.
-# This assumes "last_modified" and "source_filepath" are defined in MainConfig.METADATA_TAGS
-# and are also part of MainConfig.METADATA_INDEX_FIELDS if they are to be automatically
-# picked up by the generic metadata handling in add_documents.
 
 # The Qdrant key for the 'last_modified' conceptual field
 QDRANT_KEY_LAST_MODIFIED = MainConfig.METADATA_TAGS.get("last_modified")
@@ -115,88 +110,137 @@ class QdrantIndexManager:
                 f"--- Type of _get_worker_config: {type(self._get_worker_config)} ---"
             )
 
-    def _connect_and_setup(self, qc):
-        retries, delay = qc.connection_retries, qc.connection_initial_delay
+    def _connect_and_setup(self, qc: QdrantConfig):  # qc is config.qdrant
+        retries = qc.connection_retries
+        delay = qc.connection_initial_delay
+
         for attempt in range(1, retries + 1):
             try:
+                logger.info(
+                    f"Qdrant setup attempt {attempt}/{retries} for collection '{self.collection_name}' at {qc.host}:{qc.port}"
+                )
                 self.client = QdrantClient(
                     host=qc.host,
                     port=qc.port,
                     api_key=qc.api_key,
-                    https=False,
+                    https=False,  # Assuming HTTP
                     timeout=qc.client_timeout,
                 )
-                info = self.client.get_collection(self.collection_name)
-                if (
-                    hasattr(info, "vectors_config") and info.vectors_config is not None
-                ):  # Check for None
-                    if isinstance(
-                        info.vectors_config, dict
-                    ):  # Handle older client versions where vectors_config is a dict
-                        vec_cfg_dict = info.vectors_config
-                        # Assuming the default vector params or first named vector params
-                        default_vec_name = next(iter(vec_cfg_dict))
-                        self.vector_size = vec_cfg_dict[default_vec_name].size
-                    else:  # Handle newer client versions where vectors_config is an object
-                        self.vector_size = info.vectors_config.size
-                elif (
-                    hasattr(info, "config")
-                    and hasattr(info.config, "params")
-                    and hasattr(info.config.params, "vectors")
-                    and info.config.params.vectors is not None
-                ):  # Check for None
-                    if isinstance(
-                        info.config.params.vectors, dict
-                    ):  # Handle if vectors is a dict of VectorParams
-                        # Assuming the default vector params or first named vector params
-                        default_vec_name = next(iter(info.config.params.vectors))
-                        self.vector_size = info.config.params.vectors[
-                            default_vec_name
-                        ].size
-                    else:  # Handle if vectors is a single VectorParams object
-                        self.vector_size = info.config.params.vectors.size
-                else:
-                    # Fallback or error if vector size cannot be determined
-                    logger.warning(
-                        f"Could not reliably determine vector size from CollectionInfo: {info}. Attempting fallback."
-                    )
-                    # As a last resort, if you know the model is loaded, you could try:
-                    if self.model_index and hasattr(
-                        self.model_index, "get_sentence_embedding_dimension"
-                    ):
-                        self.vector_size = (
-                            self.model_index.get_sentence_embedding_dimension()
-                        )
-                        if not self.vector_size or self.vector_size <= 0:
-                            raise RuntimeError(
-                                "Fallback to model dimension failed or returned invalid size."
-                            )
-                        logger.info(
-                            f"Inferred vector_size from model_index: {self.vector_size}"
-                        )
-                    else:
-                        raise RuntimeError(
-                            f"Cannot determine vector size from CollectionInfo and no model_index fallback: {info}"
-                        )
 
-                self.client.get_collections()  # Verify connection
-                self._ensure_collection()
-                return
+                collection_found = False
+                try:
+                    # Attempt to get the collection
+                    info = self.client.get_collection(self.collection_name)
+                    collection_found = True
+                    logger.info(f"Collection '{self.collection_name}' found.")
+
+                    # Determine existing vector size (using your existing complex logic from the provided file)
+                    existing_vector_size = None
+                    if (
+                        hasattr(info, "vectors_config")
+                        and info.vectors_config is not None
+                    ):
+                        if isinstance(info.vectors_config, dict):
+                            vec_cfg_dict = info.vectors_config
+                            default_vec_name = next(iter(vec_cfg_dict), None)
+                            if default_vec_name and hasattr(
+                                vec_cfg_dict[default_vec_name], "size"
+                            ):
+                                existing_vector_size = vec_cfg_dict[
+                                    default_vec_name
+                                ].size
+                        elif hasattr(info.vectors_config, "size"):
+                            existing_vector_size = info.vectors_config.size
+                    elif (
+                        hasattr(info, "config")
+                        and hasattr(info.config, "params")
+                        and hasattr(info.config.params, "vectors")
+                        and info.config.params.vectors is not None
+                    ):
+                        if isinstance(info.config.params.vectors, dict):
+                            default_vec_name = next(
+                                iter(info.config.params.vectors), None
+                            )
+                            if default_vec_name and hasattr(
+                                info.config.params.vectors[default_vec_name], "size"
+                            ):
+                                existing_vector_size = info.config.params.vectors[
+                                    default_vec_name
+                                ].size
+                        elif hasattr(info.config.params.vectors, "size"):
+                            existing_vector_size = info.config.params.vectors.size
+
+                    if existing_vector_size is None:
+                        logger.warning(
+                            f"Could not reliably determine vector size from existing CollectionInfo: {info}. Attempting fallback for validation."
+                        )
+                        if self.model_index and hasattr(
+                            self.model_index, "get_sentence_embedding_dimension"
+                        ):
+                            existing_vector_size = (
+                                self.model_index.get_sentence_embedding_dimension()
+                            )
+                            if not existing_vector_size or existing_vector_size <= 0:
+                                raise RuntimeError(
+                                    "Fallback to model dimension failed or returned invalid size for existing collection."
+                                )
+                            logger.info(
+                                f"Inferred vector_size from model_index for existing collection: {existing_vector_size}"
+                            )
+                        else:
+                            raise RuntimeError(
+                                "Cannot determine vector size from CollectionInfo and no model_index fallback for existing collection."
+                            )
+
+                    self.vector_size = existing_vector_size  # Cache the found size
+
+                except UnexpectedResponse as e:
+                    if e.status_code == 404:
+                        logger.warning(
+                            f"Collection '{self.collection_name}' not found (404). Will proceed to _ensure_collection for creation."
+                        )
+                        collection_found = False  # Explicitly mark as not found
+                        # self.vector_size remains None or its previous value, _ensure_collection will handle it
+                    else:
+                        # Other UnexpectedResponse, let the outer catch handle it for retry
+                        raise e
+                self._ensure_collection()  # This method should now correctly create or validate/recreate
+
+                if not self.vector_size or self.vector_size <= 0:
+                    raise RuntimeError(
+                        f"Collection setup finished but self.vector_size is invalid: {self.vector_size}"
+                    )
+
+                logger.info(
+                    f"Qdrant setup successful for collection '{self.collection_name}'. Final vector_size: {self.vector_size}"
+                )
+                return  # Successful setup
+
             except (
                 ConnectError,
                 ReadTimeout,
                 ResponseHandlingException,
                 UnexpectedResponse,
-                RuntimeError,  # Catch RuntimeError from vector size determination
-            ) as e:
-                logger.warning(f"Qdrant connection/setup attempt {attempt} failed: {e}")
-                if attempt == retries:
-                    raise ConnectionError(
-                        f"Could not connect to Qdrant or configure collection after {retries} attempts: {e}"
+                RuntimeError,
+                ValueError,
+            ) as e_loop:
+                logger.warning(
+                    f"Qdrant connection/setup attempt {attempt} failed: {type(e_loop).__name__} - {str(e_loop)[:500]}"
+                )
+                if attempt == qc.connection_retries:
+                    logger.critical(
+                        f"All {qc.connection_retries} attempts to connect/setup Qdrant failed for collection '{self.collection_name}'."
                     )
+                    raise ConnectionError(
+                        f"Could not connect to Qdrant or configure collection '{self.collection_name}' after {qc.connection_retries} attempts: {e_loop}"
+                    ) from e_loop
                 time.sleep(delay)
-                delay = min(delay * 2, 30)  # type: ignore
+                delay = min(delay * 2, 30)
+        raise ConnectionError(
+            f"Exhausted all retries for Qdrant setup of '{self.collection_name}'."
+        )
 
+    # Ensure _ensure_collection correctly uses/infers vector_size for creation
     def _ensure_collection(self):
         try:
             existing_collections = self.client.get_collections()
@@ -205,68 +249,130 @@ class QdrantIndexManager:
             logger.error(
                 f"Failed to get existing collections from Qdrant: {e}", exc_info=True
             )
-            # Depending on the error, you might want to raise it or handle it differently
-            # For now, assume we might need to create it if we can't list.
-            existing_names = set()
+            existing_names = (
+                set()
+            )  # Assume none exist if listing fails, to trigger creation path
 
-        if (
-            self.config.qdrant.force_recreate
-            or self.collection_name not in existing_names
-        ):
+        collection_needs_creation_or_recreation = False
+        if self.config.qdrant.force_recreate:
             logger.info(
-                f"Collection '{self.collection_name}' not found or force_recreate is True. Recreating."
+                f"force_recreate is True for collection '{self.collection_name}'. Marking for recreation."
             )
-            # We need a valid vector_size to create/recreate the collection.
-            # If self.vector_size wasn't set in _connect_and_setup (e.g., collection didn't exist), get it now.
-            if self.vector_size is None:
-                if self.model_index and hasattr(
-                    self.model_index, "get_sentence_embedding_dimension"
-                ):
-                    self.vector_size = (
-                        self.model_index.get_sentence_embedding_dimension()
-                    )
-                    if not self.vector_size or self.vector_size <= 0:
-                        raise RuntimeError(
-                            "Cannot create collection: Invalid embedding model dimension."
-                        )
-                    logger.info(
-                        f"Using model_index dimension for new collection: {self.vector_size}"
-                    )
-                else:
-                    raise RuntimeError(
-                        "Cannot create collection: Embedding model dimension unknown."
-                    )
-            self.clear_index()  # clear_index will use self.vector_size
+            collection_needs_creation_or_recreation = True
+        elif self.collection_name not in existing_names:
+            logger.info(
+                f"Collection '{self.collection_name}' not in existing Qdrant collections. Marking for creation."
+            )
+            collection_needs_creation_or_recreation = True
+        else:  # Collection exists, check dimension if not forcing recreate
+            logger.debug(
+                f"Collection '{self.collection_name}' exists. Checking configuration."
+            )
+            desired_vector_size = self.config.vector_size or self._get_embedding_dim()
+            if not desired_vector_size or desired_vector_size <= 0:
+                raise RuntimeError(
+                    f"Cannot ensure collection: Invalid desired vector size {desired_vector_size}."
+                )
+
+            if self.vector_size and self.vector_size != desired_vector_size:
+                logger.warning(
+                    f"Dimension mismatch for '{self.collection_name}'. Existing: {self.vector_size}, Desired: {desired_vector_size}. Marking for recreation."
+                )
+                collection_needs_creation_or_recreation = True
+            elif (
+                not self.vector_size
+            ):  # Could not determine existing size, but collection exists. Risky.
+                logger.warning(
+                    f"Could not determine vector size of existing collection '{self.collection_name}'. "
+                    f"If force_recreate is false, this might lead to issues. Desired size is {desired_vector_size}."
+                )
+        if collection_needs_creation_or_recreation:
+            size_for_creation = (
+                self.config.vector_size
+            )  # From MainConfig (could be None)
+            if not isinstance(size_for_creation, int) or size_for_creation <= 0:
+                logger.info(
+                    f"vector_size not explicitly in config or invalid ({size_for_creation}). Inferring from model for _ensure_collection."
+                )
+                size_for_creation = self._get_embedding_dim()
+            if not isinstance(size_for_creation, int) or size_for_creation <= 0:
+                raise RuntimeError(
+                    f"Cannot create/recreate collection '{self.collection_name}': Invalid or unknown vector dimension ({size_for_creation})."
+                )
+
+            logger.info(
+                f"Proceeding to clear/recreate '{self.collection_name}' with vector size {size_for_creation}."
+            )
+            if not self.clear_index(
+                vector_size_override=size_for_creation
+            ):  # Pass the determined size
+                raise RuntimeError(
+                    f"Failed to clear/recreate index for '{self.collection_name}' during ensure_collection."
+                )
+            self.vector_size = size_for_creation  # Ensure self.vector_size is updated
         else:
-            logger.debug(f"Using existing collection '{self.collection_name}'")
+            logger.debug(
+                f"Using existing collection '{self.collection_name}' as per configuration."
+            )
+            # Ensure self.vector_size is set if it wasn't (e.g. if it was None and collection existed)
+            if self.vector_size is None:
+                self.vector_size = self.config.vector_size or self._get_embedding_dim()
+                if not self.vector_size or self.vector_size <= 0:
+                    raise RuntimeError(
+                        f"Collection '{self.collection_name}' exists but its vector size could not be determined or set."
+                    )
 
     def recreate_collection(self, vector_size: int) -> bool:
         try:
-            if self.client:
-                logger.info(f"Deleting existing collection '{self.collection_name}'...")
+            if not self.client:
+                logger.error("Qdrant client not initialized for recreate_collection.")
+                return False
+
+            collection_exists = False
+            try:
+                self.client.get_collection(collection_name=self.collection_name)
+                collection_exists = True
+            except UnexpectedResponse as e:
+                if e.status_code != 404:
+                    logger.warning(
+                        f"Unexpected error checking collection existence before recreate: {e.status_code} - {e.content!r}"
+                    )
+                    # Depending on strictness, might re-raise or just proceed
+            except Exception as e_check:
+                logger.warning(
+                    f"Error checking collection existence: {e_check}. Proceeding with recreate attempt."
+                )
+
+            if collection_exists:
+                logger.info(
+                    f"Collection '{self.collection_name}' exists. Attempting to delete before recreate."
+                )
                 try:
                     self.client.delete_collection(collection_name=self.collection_name)
-                except Exception as e:
-                    # Log if deletion failed but proceed to create, as it might not exist
+                    logger.info(
+                        f"Successfully deleted collection '{self.collection_name}'."
+                    )
+                except Exception as e_del:  # Could be UnexpectedResponse if delete fails on non-existent
                     logger.warning(
-                        f"Failed to delete collection (it might not exist): {e}"
+                        f"Failed to delete existing collection '{self.collection_name}': {e_del}. Will attempt recreate anyway.",
+                        exc_info=True,
                     )
 
-                logger.info(
-                    f"Creating new collection '{self.collection_name}' with vector size {vector_size}..."
-                )
-                self.client.recreate_collection(
-                    collection_name=self.collection_name,
-                    vectors_config=models.VectorParams(
-                        size=vector_size,
-                        distance=self.config.qdrant.distance,  # Use configured distance
-                    ),
-                )
-                self.vector_size = vector_size
-                return True
-            else:
-                logger.error("Qdrant client not initialized.")
-                return False
+            logger.info(
+                f"Attempting to create/recreate collection '{self.collection_name}' with "
+                f"vector size {vector_size} and distance {self.config.qdrant.distance}."
+            )
+            self.client.recreate_collection(
+                collection_name=self.collection_name,
+                vectors_config=models.VectorParams(
+                    size=vector_size,  # Use the explicitly passed vector_size
+                    distance=self.config.qdrant.distance,  # This should be the enum after Pydantic validation
+                ),
+            )
+            logger.info(
+                f"Collection '{self.collection_name}' successfully created/recreated with vector size {vector_size}."
+            )
+            return True
         except Exception as e:
             logger.error(
                 f"Failed to recreate collection '{self.collection_name}': {e}",
@@ -298,38 +404,42 @@ class QdrantIndexManager:
             logger.warning(f"Qdrant connection check failed: {e}")
             return False
 
-    def clear_index(self) -> bool:
-        """Deletes and recreates the collection. Uses self.vector_size or infers from model."""
+    def clear_index(self, vector_size_override: Optional[int] = None) -> bool:
         try:
             if not self.client:
                 logger.error("Qdrant client not initialized. Cannot clear index.")
                 return False
 
-            current_vector_size = self.vector_size
-            if current_vector_size is None:
-                logger.info(
-                    "Vector size not cached, trying to infer from model for clear_index."
-                )
-                current_vector_size = self._get_embedding_dim()
-                if current_vector_size <= 0:  # _get_embedding_dim returns -1 on failure
-                    raise RuntimeError(
-                        "Cannot clear/create collection: Invalid or unknown embedding dimension."
+            # Determine the vector size to use for recreation
+            size_to_use = vector_size_override
+            if size_to_use is None:  # If not overridden, try self.vector_size or infer
+                size_to_use = self.vector_size
+                if not isinstance(size_to_use, int) or size_to_use <= 0:
+                    logger.info(
+                        "Vector size not cached or invalid, trying to infer from model for clear_index."
                     )
-                self.vector_size = current_vector_size  # Cache it
+                    size_to_use = self._get_embedding_dim()
+
+            if not isinstance(size_to_use, int) or size_to_use <= 0:
+                raise RuntimeError(
+                    f"Cannot clear/recreate collection: Invalid or unknown embedding dimension ({size_to_use})."
+                )
 
             logger.info(
-                f"Clearing index by recreating collection '{self.collection_name}' with vector size {current_vector_size}."
+                f"Clearing index by recreating collection '{self.collection_name}' with vector size {size_to_use}."
             )
-            # Recreate_collection handles deletion and creation
-            return self.recreate_collection(vector_size=current_vector_size)
-
+            if not self.recreate_collection(
+                vector_size=size_to_use
+            ):  # Pass the determined size
+                return False
+            self.vector_size = size_to_use  # Update cached vector size
+            return True
         except Exception as e:
             logger.error(
                 f"Failed to clear index '{self.collection_name}': {e}", exc_info=True
             )
             return False
 
-    # ++ Restored _get_worker_config method ++
     def _get_worker_config(self) -> WorkerConfig:
         """Prepares worker configuration based on the main application config."""
         # Determine the active indexing profile or use top-level defaults

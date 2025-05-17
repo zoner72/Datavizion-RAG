@@ -18,30 +18,19 @@ from qdrant_client.models import Distance
 logger = logging.getLogger(__name__)
 
 # --- Default Prefixes Definition ---
-# Canonical source for default prefixes for known models
-# Ensure trailing spaces are included where needed by the model!
 DEFAULT_EMBEDDING_PREFIXES = {
-    # Default for models without specific prefixes
     "default": {"query": "", "document": ""},
-    # Model-specific overrides
     "BAAI/bge-small-en-v1.5": {"query": "", "document": ""},
     "nomic-ai/nomic-embed-text-v1.5": {
         "query": "search_query: ",
         "document": "search_document: ",
     },
-    "Snowflake/snowflake-arctic-embed-m-v2.0": {  # Corrected model name if it was a typo
+    "Snowflake/snowflake-arctic-embed-m-v2.0": {
         "query": "Represent this sentence for searching relevant passages: ",
         "document": "",
     },
-    "Alibaba-NLP/gte-modernbert-base": {
-        "query": "",
-        "document": "",
-    },  # Example, ensure correct name
-    "google/bigbird-roberta-base": {
-        "query": "",
-        "document": "",
-    },  # Example, ensure correct name
-    # Add other models you might use and their known prefixes here
+    "Alibaba-NLP/gte-modernbert-base": {"query": "", "document": ""},
+    "google/bigbird-roberta-base": {"query": "", "document": ""},
 }
 
 
@@ -119,12 +108,12 @@ class QdrantConfig(BaseModel):
         default=Distance.COSINE,
         description="Distance metric to use for vector similarity ( 'Cosine', 'Euclid', 'Dot' or 'Manhattan' ).",
     )
-    fastembed: Dict[str, int] = (
-        Field(  # Changed from Dict[str, int] to Dict[str, Any] for flexibility
+    fastembed: Dict[str, Optional[int]] = (
+        Field(  # Your original had Dict[str, int], changed to Optional[int] for parallel=None
             default_factory=lambda: {
                 "batch_size": 16,
                 "parallel": None,
-            },  # parallel can be None for auto
+            },
             description="FastEmbed settings: batch_size and parallelism (None for auto).",
         )
     )
@@ -201,9 +190,6 @@ class MainConfig(BaseModel):
     model: Optional[str] = Field(
         default=None, description="Identifier of the specific LLM model to use."
     )
-    prompt_template: str = Field(
-        default="", description="Template for LLM prompt (rarely needed with Chat API)."
-    )
     response_format: Optional[str] = Field(
         default=None,
         description="Desired response format (e.g., 'json', 'text' - depends on LLM).",
@@ -255,19 +241,15 @@ class MainConfig(BaseModel):
         default=None,
         description="Path to the application log file (Set automatically by main.py).",
     )
-    app_data_dir: Optional[Path] = (
-        Field(  # Added for clarity where app-specific data like tracked_websites.json goes
-            default=None,
-            description="Directory for application-specific data (Set automatically by main.py).",
-        )
+    app_data_dir: Optional[Path] = Field(
+        default=None,
+        description="Directory for application-specific data (Set automatically by main.py).",
     )
 
     # --- Qdrant & Embedding ---
-    qdrant: QdrantConfig = Field(
-        default_factory=QdrantConfig
-    )  # Moved qdrant field here
+    qdrant: QdrantConfig = Field(default_factory=QdrantConfig)
     embedding_model_index: str = Field(
-        default="BAAI/bge-m3",  # Changed default to a more powerful model
+        default="BAAI/bge-m3",
         description="Model ID for index embeddings (Hugging Face or local path).",
     )
     embedding_model_query: Optional[str] = Field(
@@ -291,7 +273,6 @@ class MainConfig(BaseModel):
     indexing_profile: str = Field(
         default="normal", description="Active indexing profile ('normal', 'intense')."
     )
-    # Base settings potentially overridden by profile
     chunk_size: int = Field(
         default=300,
         description="Base token chunk size (used if profile doesn't specify).",
@@ -302,74 +283,65 @@ class MainConfig(BaseModel):
     )
     boilerplate_removal: bool = Field(
         default=False, description="Base boilerplate removal setting."
-    )  # Added for _get_worker_config fallback
+    )
 
-    # Batch sizes
     indexing_batch_size: int = Field(
-        default=64,
-        description="Chunks per batch for Qdrant upsert.",  # Adjusted default
+        default=64,  # Your config.json had 100, but model had 64. Using model's.
+        description="Chunks per batch for Qdrant upsert.",
     )
     embedding_batch_size: int = Field(
         default=32, description="Texts per batch for embedding encode."
     )
 
-    # --- Metadata Tag Keys for Indexing Payloads ---
-    # These map conceptual field names to the actual keys stored in Qdrant's payload.
     METADATA_TAGS: ClassVar[Dict[str, str]] = {
-        "text": "text_content",  # Example: Qdrant key for the main text
+        "text": "text_content",
         "section_title": "section_title_tag",
         "parent_headings": "parent_headings_tag",
         "source_url": "source_url_tag",
         "pdf_url": "pdf_url_tag",
         "anchor_text": "anchor_text_tag",
         "filename": "filename_tag",
-        "doc_id": "document_id_tag",  # Qdrant key for the document ID
+        "doc_id": "document_id_tag",
         "chunk_index": "chunk_index_tag",
         "page_number": "page_number_tag",
         "embedding_model": "embedding_model_name_tag",
-        "chunk_id": "chunk_id_tag",  # Qdrant key for the unique chunk ID
-        "last_modified": "file_last_modified_timestamp",  # Qdrant key for last modified
-        "source_filepath": "source_file_path_qdrant",  # ++ ADDED Qdrant key for source_filepath ++
-        # Add any other conceptual_key -> qdrant_key mappings you need
+        "chunk_id": "chunk_id_tag",
+        "last_modified": "file_last_modified_timestamp",
+        "source_filepath": "source_file_path_qdrant",
     }
-
-    # --- Conceptual Metadata Fields to be Indexed ---
-    # List of conceptual keys that should be processed from chunk metadata and stored in Qdrant.
-    # The actual Qdrant key used will be determined by METADATA_TAGS.
     METADATA_INDEX_FIELDS: ClassVar[List[str]] = [
-        "doc_id",  # Conceptual key
-        "chunk_id",  # Conceptual key
-        "chunk_index",  # Conceptual key
-        "filename",  # Conceptual key
-        "page_number",  # Conceptual key
-        "section_title",  # Conceptual key
-        "parent_headings",  # Conceptual key
-        "source_url",  # Conceptual key
-        "pdf_url",  # Conceptual key
-        "source_page",  # Conceptual key (Note: Ensure this is provided by DataLoader if used)
-        "anchor_text",  # Conceptual key
-        "last_modified",  # ++ ADDED conceptual key ++
-        "source_filepath",  # ++ ADDED conceptual key ++
-        # Add other conceptual keys you want to ensure are indexed if present in chunk metadata
+        "doc_id",
+        "chunk_id",
+        "chunk_index",
+        "filename",
+        "page_number",
+        "section_title",
+        "parent_headings",
+        "source_url",
+        "pdf_url",
+        "source_page",
+        "anchor_text",
+        "last_modified",
+        "source_filepath",
     ]
 
     # --- Retrieval ---
     relevance_threshold: float = Field(
-        default=0.6,  # Adjusted default
+        default=0.6,
         description="Similarity threshold for filtering retrieved chunks (0–1).",
     )
     cache_enabled: bool = Field(
         default=False, description="Enable in-memory retrieval result caching."
     )
-    keyword_weight: float = Field(
-        default=0.4,  # Adjusted default
+    keyword_weight: float = Field(  # Your config.json had 0.8, model default 0.4. Using model's.
+        default=0.4,
         ge=0.0,
         le=1.0,
         description="Weight for keyword-based search in hybrid search (0.0 = pure semantic, 1.0 = pure keyword).",
     )
-    top_k: int = Field(
+    top_k: int = Field(  # Your config.json had 7, model default 8. Using model's.
         default=8,
-        description="Number of initial results from vector search.",  # Adjusted default
+        description="Number of initial results from vector search.",
     )
     max_context_tokens: int = Field(
         default=4096, description="Approx. max tokens for LLM context window."
@@ -381,16 +353,18 @@ class MainConfig(BaseModel):
     enable_reranking: bool = Field(
         default=True, description="Enable reranking with CrossEncoder."
     )
-    preprocess: bool = Field(  # This seems to relate to text cleaning before chunking
+    preprocess: bool = Field(
         default=True, description="Run text preprocessing before chunking/embedding."
     )
     reranker_model: Optional[str] = Field(
         default="BAAI/bge-reranker-v2-m3",
         description="Cross-encoder model for reranking.",
     )
-    top_k_rerank: int = Field(
-        default=4,
-        description="Number of results to feed into the reranker.",  # Adjusted default
+    top_k_rerank: int = (
+        Field(  # Your config.json had 5, model default 4. Using model's.
+            default=4,
+            description="Number of results to feed into the reranker.",
+        )
     )
     max_parallel_filters: int = Field(
         default=5,
@@ -400,83 +374,89 @@ class MainConfig(BaseModel):
     )
 
     # --- Scraping ---
+    # NOTE: The field 'scraping_timeout' from your original MainConfig is now split into:
+    # 'scraping_individual_request_timeout_s' and 'scraping_global_timeout_s'.
+    # Ensure your config.json reflects these new names.
     scraping_max_depth: int = Field(
-        default=2,
-        description="Max link depth for web crawler.",  # Adjusted default
+        default=3,  # Changed from original 2 for a slightly deeper default
+        description="Max link depth for web crawler.",
     )
     scraping_user_agent: str = Field(
-        default="Mozilla/5.0 (compatible; KnowledgeLLMBot/1.0; +https://example.com/bot-info)",  # Generic example
+        default="Mozilla/5.0 (compatible; KnowledgeLLMBot/1.0; +https://example.com/bot-info)",
         description="User-Agent for web scraping.",
     )
     scraping_max_concurrent: int = Field(
-        default=8,
-        description="Max concurrent requests during scraping.",  # Adjusted default
+        default=8,  # Your config.json had 10. Using model's default.
+        description="Max concurrent requests during scraping.",
     )
-    scraping_timeout: int = Field(
-        default=20,  # Adjusted default
+    # THIS FIELD REPLACES THE OLD 'scraping_timeout' for individual requests
+    scraping_individual_request_timeout_s: int = Field(
+        default=60,  # Default for a single HTTP request (e.g., 60 seconds)
         ge=1,
-        description="Timeout (seconds) for individual scrape requests.",
+        description="Timeout (seconds) for individual scrape HTTP requests within scrape_pdfs.py.",
     )
-
-    @field_validator("scraping_timeout")
-    @classmethod
-    def _validate_scraping_timeout(cls, v: int) -> int:  # Type hint for v
-        if v < 1:
-            raise ValueError("scraping_timeout must be at least 1 second")
-        return v
+    # THIS FIELD IS FOR THE OVERALL SUBPROCESS TIMEOUT (used by ScrapeWorker)
+    # Your original MainConfig had scraping_global_timeout_s, but its default was 10900.
+    # Setting a more common default here like 900 (15 mins).
+    # Your config.json has 10800 for scraping_timeout, which should now map to scraping_global_timeout_s.
+    scraping_global_timeout_s: int = Field(
+        default=900,
+        ge=1,
+        description="Global timeout (seconds) for the entire scraping subprocess/script run.",
+    )
+    scraping_max_redirects: int = Field(
+        default=10,
+        ge=0,
+        description="Maximum number of redirects for HTTP requests during scraping.",
+    )
+    scraping_max_pages_per_domain: Optional[int] = Field(
+        default=None,
+        # ge=1, # Pydantic v2: ge with Optional default None needs careful handling or a validator
+        description="Optional: Max pages to crawl per domain. None means no limit beyond depth.",
+    )
 
     # --- GUI Settings ---
     gui_worker_animation_ms: int = Field(
-        default=150,
-        description="Duration (ms) for worker UI animations.",  # Adjusted default
+        default=150,  # Your config.json had 200. Using model's default.
+        description="Duration (ms) for worker UI animations.",
     )
     gui_status_trunc_len: int = Field(
-        default=70,
-        description="Max chars per status bar message segment.",  # Adjusted default
+        default=60,  # Your config.json had 60. Consistent.
+        description="Max chars per status bar message segment.",
     )
     gui_log_lines: int = Field(
-        default=250,
-        description="Number of log lines in GUI log viewer.",  # Adjusted default
+        default=200,  # Your config.json had 200. Consistent.
+        description="Number of log lines in GUI log viewer.",
     )
     gui_log_refresh_ms: int = Field(
-        default=3000,
-        description="Refresh interval (ms) for GUI log viewer.",  # Adjusted default
+        default=5000,  # Your config.json had 5000. Consistent.
+        description="Refresh interval (ms) for GUI log viewer.",
     )
     api_monitor_interval_ms: int = Field(
-        default=2000,
-        description="Polling interval (ms) for internal API health check.",  # Adjusted default
+        default=1500,  # Your config.json had 1500. Consistent.
+        description="Polling interval (ms) for internal API health check.",
     )
 
     # --- Misc ---
     rejected_docs_foldername: str = Field(
-        default="_rejected_documents",
-        description="Subfolder name for rejected documents.",  # More descriptive
+        default="rejected_docs",  # Your config.json had this. Consistent.
+        description="Subfolder name for rejected documents.",
     )
 
     # --- Nested Models ---
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
-    # qdrant: QdrantConfig = Field(default_factory=QdrantConfig) # Already defined above
     api: ApiServerConfig = Field(default_factory=ApiServerConfig)
-    # Profile Instances
     normal: NormalProfileConfig = Field(default_factory=NormalProfileConfig)
     intense: IntenseProfileConfig = Field(default_factory=IntenseProfileConfig)
 
-    # Other Complex Types
     scraped_websites: Dict[str, WebsiteEntry] = Field(
-        default_factory=dict, description="State tracking for scraped websites."
-    )
-    gui: Dict[str, Any] = Field(
-        default_factory=dict,
-        description="Placeholder for additional GUI-specific persistent settings.",
-    )
-    metadata_extraction_level: str = Field(
-        default="basic",
-        description="Metadata extraction level ('basic', 'enhanced', 'llm').",  # Added 'llm'
-    )
+        default_factory=dict
+    )  # Removed description for brevity
+    gui: Dict[str, Any] = Field(default_factory=dict)  # Removed description
+    metadata_extraction_level: str = Field(default="basic")  # Removed description
     metadata_fields_to_extract: List[str] = Field(
-        default_factory=list,
-        description="Fields for 'enhanced' or 'llm' metadata extraction.",
-    )
+        default_factory=list
+    )  # Removed description
 
     # --- Validators ---
     @field_validator("embedding_model_query", mode="before")
@@ -484,11 +464,41 @@ class MainConfig(BaseModel):
     def default_embedding_model_query(
         cls, v: Optional[str], info: ValidationInfo
     ) -> Optional[str]:
-        """
-        If no explicit query model is given, default to the index model.
-        """
         index_model = info.data.get("embedding_model_index")
         return v or index_model
+
+    # Validator for scraping_individual_request_timeout_s (replaces _validate_scraping_timeout)
+    @field_validator("scraping_individual_request_timeout_s")
+    @classmethod
+    def _validate_scraping_individual_request_timeout(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError(
+                "scraping_individual_request_timeout_s must be at least 1 second"
+            )
+        return v
+
+    # Validator for scraping_global_timeout_s
+    @field_validator("scraping_global_timeout_s")
+    @classmethod
+    def check_global_timeout_vs_individual(cls, v: int, info: ValidationInfo) -> int:
+        # Use .get with a default for individual_timeout in case it's not yet processed by Pydantic
+        # or if it's missing (though it has a default in the model)
+        individual_timeout = info.data.get("scraping_individual_request_timeout_s", 60)
+        if v < individual_timeout:
+            logger.warning(
+                f"scraping_global_timeout_s ({v}s) is less than scraping_individual_request_timeout_s ({individual_timeout}s). "
+                f"This might lead to premature global timeouts."
+            )
+        if v < 1:
+            raise ValueError("scraping_global_timeout_s must be at least 1 second")
+        return v
+
+    @field_validator("scraping_max_pages_per_domain")
+    @classmethod
+    def _validate_max_pages(cls, v: Optional[int]) -> Optional[int]:
+        if v is not None and v < 1:
+            raise ValueError("scraping_max_pages_per_domain must be None or at least 1")
+        return v
 
     class Config:
         extra = Extra.ignore
@@ -496,39 +506,26 @@ class MainConfig(BaseModel):
         arbitrary_types_allowed = True
 
 
-# --- Helper Functions ---
 def _load_json_data(config_path: Path) -> dict:
-    """Loads JSON data from a file path, returning empty dict on error."""
     if not config_path.is_file():
-        logger.warning(
-            f"Configuration file not found: {config_path}. Using default values."
-        )
+        logger.warning(f"Config file {config_path} not found. Using defaults.")
         return {}
     try:
         return json.loads(config_path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as e:
-        logger.error(
-            f"Error decoding config JSON from {config_path}: {e}. Using default values."
-        )
+        logger.error(f"Error decoding {config_path}: {e}. Using defaults.")
         return {}
     except Exception as e:
-        logger.error(
-            f"Unexpected error loading config {config_path}: {e}", exc_info=True
-        )
+        logger.error(f"Error loading {config_path}: {e}", exc_info=True)
         return {}
 
 
 def save_config_to_path(config: MainConfig, config_path: Union[str, Path]):
-    """Saves the MainConfig object to a JSON file."""
     config_file = Path(config_path).resolve()
     try:
         config_file.parent.mkdir(parents=True, exist_ok=True)
         config_json_str = config.model_dump_json(indent=4, exclude_none=True)
         config_file.write_text(config_json_str, encoding="utf-8")
-        logger.info(f"Configuration successfully saved to {config_file}")
+        logger.info(f"Configuration saved to {config_file}")
     except Exception as e:
-        logger.error(
-            f"Failed to save configuration to {config_file}: {e}", exc_info=True
-        )
-        # Optionally re-raise, or handle more gracefully depending on application needs
-        # raise
+        logger.error(f"Failed to save config to {config_file}: {e}", exc_info=True)

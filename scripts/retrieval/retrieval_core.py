@@ -215,9 +215,9 @@ class MemoryContextManager:
                     if (
                         hit
                         and hasattr(hit, "payload")
-                        and "text_with_context" in hit.payload
+                        and "text_content" in hit.payload  # <-- CORRECTED KEY
                     ):
-                        chunk_text = hit.payload["text_with_context"].strip()
+                        chunk_text = hit.payload["text_content"].strip()
                         if chunk_text:
                             rerank_inputs.append((query, chunk_text))
                             rerank_meta.append(hit)
@@ -241,33 +241,39 @@ class MemoryContextManager:
         )
         unique_doc_texts = set()
 
-        for hit in results:
-            if (
-                hit
-                and hasattr(hit, "score")
-                and hasattr(hit, "payload")
-                and isinstance(hit.score, (float, int))
-            ):
-                if hit.score >= self.relevance_threshold:
-                    try:
-                        text = hit.payload.get(
-                            "text_with_context", hit.payload.get("text", "")
-                        )
-                        metadata = hit.payload.get("metadata", {})
-                        filepath = metadata.get("source_filepath", "Unknown Filepath")
+        for (
+            hit_object,
+            reranker_score_value,
+        ) in scored:  # Iterate through the (hit, reranker_score) tuples
+            # Now, use reranker_score_value for thresholding
+            if reranker_score_value >= self.relevance_threshold:
+                try:
+                    text_content_from_payload = hit_object.payload.get(
+                        "text_content", ""
+                    ).strip()
+                    filepath = hit_object.payload.get(
+                        "source_file_path_qdrant",
+                        hit_object.payload.get("filename_tag", "Unknown Filepath"),
+                    )
 
-                        if text and isinstance(text, str):
-                            text_content = text.strip()
-                            if text_content and text_content not in unique_doc_texts:
-                                context_chunks.append(text_content)
-                                retrieved_docs.append(
-                                    (filepath, text_content, float(hit.score))
-                                )
-                                unique_doc_texts.add(text_content)
-                    except Exception as payload_e:
-                        logger.warning(
-                            f"Error processing payload: {payload_e} - Hit: {getattr(hit, 'id', 'N/A')}"
+                    if (
+                        text_content_from_payload
+                        and text_content_from_payload not in unique_doc_texts
+                    ):
+                        context_chunks.append(text_content_from_payload)
+                        # Store the RERANKER score with the document
+                        retrieved_docs.append(
+                            (
+                                filepath,
+                                text_content_from_payload,
+                                float(reranker_score_value),
+                            )
                         )
+                        unique_doc_texts.add(text_content_from_payload)
+                except Exception as payload_e:
+                    logger.warning(
+                        f"Error processing payload: {payload_e} - Hit: {getattr(hit_object, 'id', 'N/A')}"
+                    )
             else:
                 logger.debug(
                     f"Skipping invalid hit (missing score/payload or invalid score type): {hit}"

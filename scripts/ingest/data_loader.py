@@ -9,7 +9,6 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import nltk
 
-# --- Optional Transformer Import ---
 try:
     from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
@@ -262,34 +261,26 @@ class DataLoader:
             if not txt.strip():
                 continue
 
-            # CORRECTED: Use conceptual string keys for the meta dictionary
+            from config_models import MainConfig
+
+            M = MainConfig.METADATA_TAGS  # Qdrant-ready keys
+            F = MainConfig.METADATA_INDEX_FIELDS  # Conceptual keys
+
             meta = {
-                "doc_id": doc_id,
-                "chunk_index": idx,
-                "chunk_id": f"{doc_id}_{idx}",
-                "filename": short_filename,
-                "source_filepath": resolved,  # This was already correct (conceptual key)
-                "contains_table": c.get("metadata", {}).get(
-                    "contains_table", False
-                ),  # This was already correct
-                # Add other conceptual keys if needed, e.g., "last_modified" if available here
+                M["doc_id"]: doc_id,
+                M["chunk_index"]: idx,
+                M["chunk_id"]: f"{doc_id}_{idx}",
+                M["filename"]: short_filename,
+                M["source_filepath"]: resolved,
+                "contains_table": c.get("metadata", {}).get("contains_table", False),
             }
 
-            # Dynamically add other metadata fields if available
-            # This part assumes chunk_meta (from self.chunk_text) also uses conceptual keys
-            # The current self.chunk_text only adds "contains_table" to its metadata.
-            # If self.chunk_text were to add more, this loop would pick them up.
             chunk_meta_from_chunker = c.get("metadata", {})
-            for (
-                conceptual_key_from_config
-            ) in F:  # F is MainConfig.METADATA_INDEX_FIELDS (conceptual keys)
-                if (
-                    conceptual_key_from_config in chunk_meta_from_chunker
-                    and conceptual_key_from_config not in meta
-                ):
-                    meta[conceptual_key_from_config] = chunk_meta_from_chunker[
-                        conceptual_key_from_config
-                    ]
+            for conceptual_key in F:
+                if conceptual_key in chunk_meta_from_chunker:
+                    qdrant_key = M.get(conceptual_key)
+                    if qdrant_key and qdrant_key not in meta:
+                        meta[qdrant_key] = chunk_meta_from_chunker[conceptual_key]
 
             final.append(
                 (resolved, {"text": txt, "text_with_context": txt, "metadata": meta})

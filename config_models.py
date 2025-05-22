@@ -108,14 +108,12 @@ class QdrantConfig(BaseModel):
         default=Distance.COSINE,
         description="Distance metric to use for vector similarity ( 'Cosine', 'Euclid', 'Dot' or 'Manhattan' ).",
     )
-    fastembed: Dict[str, Optional[int]] = (
-        Field(  # Your original had Dict[str, int], changed to Optional[int] for parallel=None
-            default_factory=lambda: {
-                "batch_size": 16,
-                "parallel": None,
-            },
-            description="FastEmbed settings: batch_size and parallelism (None for auto).",
-        )
+    fastembed: Dict[str, Optional[int]] = Field(
+        default_factory=lambda: {
+            "batch_size": 16,
+            "parallel": None,
+        },
+        description="FastEmbed settings: batch_size and parallelism (None for auto).",
     )
 
 
@@ -252,8 +250,8 @@ class MainConfig(BaseModel):
         default="BAAI/bge-m3",
         description="Model ID for index embeddings (Hugging Face or local path).",
     )
-    vector_size: Optional[int] = Field(  # Make it optional initially
-        default=None,  # Or a common default like 768 if you prefer
+    vector_size: Optional[int] = Field(
+        default=None,
         description="Dimension of the embedding vectors. Should be set based on the chosen embedding_model_index. If None, will attempt to infer from model.",
     )
     embedding_model_query: Optional[str] = Field(
@@ -290,7 +288,7 @@ class MainConfig(BaseModel):
     )
 
     indexing_batch_size: int = Field(
-        default=64,  # Your config.json had 100, but model had 64. Using model's.
+        default=64,
         description="Chunks per batch for Qdrant upsert.",
     )
     embedding_batch_size: int = Field(
@@ -337,13 +335,13 @@ class MainConfig(BaseModel):
     cache_enabled: bool = Field(
         default=False, description="Enable in-memory retrieval result caching."
     )
-    keyword_weight: float = Field(  # Your config.json had 0.8, model default 0.4. Using model's.
+    keyword_weight: float = Field(
         default=0.4,
         ge=0.0,
         le=1.0,
         description="Weight for keyword-based search in hybrid search (0.0 = pure semantic, 1.0 = pure keyword).",
     )
-    top_k: int = Field(  # Your config.json had 7, model default 8. Using model's.
+    top_k: int = Field(
         default=8,
         description="Number of initial results from vector search.",
     )
@@ -364,11 +362,9 @@ class MainConfig(BaseModel):
         default="BAAI/bge-reranker-v2-m3",
         description="Cross-encoder model for reranking.",
     )
-    top_k_rerank: int = (
-        Field(  # Your config.json had 5, model default 4. Using model's.
-            default=4,
-            description="Number of results to feed into the reranker.",
-        )
+    top_k_rerank: int = Field(
+        default=4,
+        description="Number of results to feed into the reranker.",
     )
     max_parallel_filters: int = Field(
         default=5,
@@ -378,26 +374,22 @@ class MainConfig(BaseModel):
     )
 
     # --- Scraping ---
+    scraping_log_interval_s: int = Field(default=30, gt=0)
     scraping_user_agent: str = Field(
         default="Mozilla/5.0 (compatible; KnowledgeLLMBot/1.0; +https://example.com/bot-info)",
         description="User-Agent for web scraping.",
     )
     scraping_max_concurrent: int = Field(
-        default=20,  # Your config.json had 10. Using model's default.
+        default=10,  # Changed from 20 to 10 to match earlier discussion, adjust as needed
         description="Max concurrent requests during scraping.",
     )
-    # THIS FIELD REPLACES THE OLD 'scraping_timeout' for individual requests
     scraping_individual_request_timeout_s: int = Field(
-        default=60,  # Default for a single HTTP request (e.g., 60 seconds)
+        default=60,
         ge=1,
         description="Timeout (seconds) for individual scrape HTTP requests within scrape_pdfs.py.",
     )
-    # THIS FIELD IS FOR THE OVERALL SUBPROCESS TIMEOUT (used by ScrapeWorker)
-    # Your original MainConfig had scraping_global_timeout_s, but its default was 10900.
-    # Setting a more common default here like 900 (15 mins).
-    # Your config.json has 10800 for scraping_timeout, which should now map to scraping_global_timeout_s.
     scraping_global_timeout_s: int = Field(
-        default=900,
+        default=1800,  # Changed from 900 to 1800 (30 mins) as a more generous default
         ge=1,
         description="Global timeout (seconds) for the entire scraping subprocess/script run.",
     )
@@ -408,35 +400,45 @@ class MainConfig(BaseModel):
     )
     scraping_max_pages_per_domain: Optional[int] = Field(
         default=None,
-        # ge=1, # Pydantic v2: ge with Optional default None needs careful handling or a validator
         description="Optional: Max pages to crawl per domain. None means no limit beyond depth.",
     )
+    # >>> NEW FIELDS FOR SCRAPING TEXT EXTRACTION <<<
+    scraping_content_selectors: Optional[List[str]] = Field(
+        default=None,
+        description="Optional list of CSS selectors to identify main content areas for text extraction. If None or empty, fallback logic is used.",
+    )
+    scraping_min_content_length: int = Field(
+        default=50,  # Increased default from 25, can be tuned
+        ge=0,
+        description="Minimum number of characters for extracted text to be considered actual content (not rejected).",
+    )
+    # >>> END OF NEW FIELDS <<<
 
     # --- GUI Settings ---
     gui_worker_animation_ms: int = Field(
-        default=150,  # Your config.json had 200. Using model's default.
+        default=150,
         description="Duration (ms) for worker UI animations.",
     )
     gui_status_trunc_len: int = Field(
-        default=60,  # Your config.json had 60. Consistent.
+        default=60,
         description="Max chars per status bar message segment.",
     )
     gui_log_lines: int = Field(
-        default=200,  # Your config.json had 200. Consistent.
+        default=200,
         description="Number of log lines in GUI log viewer.",
     )
     gui_log_refresh_ms: int = Field(
-        default=5000,  # Your config.json had 5000. Consistent.
+        default=5000,
         description="Refresh interval (ms) for GUI log viewer.",
     )
     api_monitor_interval_ms: int = Field(
-        default=1500,  # Your config.json had 1500. Consistent.
+        default=1500,
         description="Polling interval (ms) for internal API health check.",
     )
 
     # --- Misc ---
     rejected_docs_foldername: str = Field(
-        default="rejected_docs",  # Your config.json had this. Consistent.
+        default="_rejected_documents",  # Corrected to match usage in scrape_pdfs.py
         description="Subfolder name for rejected documents.",
     )
 
@@ -446,14 +448,10 @@ class MainConfig(BaseModel):
     normal: NormalProfileConfig = Field(default_factory=NormalProfileConfig)
     intense: IntenseProfileConfig = Field(default_factory=IntenseProfileConfig)
 
-    scraped_websites: Dict[str, WebsiteEntry] = Field(
-        default_factory=dict
-    )  # Removed description for brevity
-    gui: Dict[str, Any] = Field(default_factory=dict)  # Removed description
-    metadata_extraction_level: str = Field(default="basic")  # Removed description
-    metadata_fields_to_extract: List[str] = Field(
-        default_factory=list
-    )  # Removed description
+    scraped_websites: Dict[str, WebsiteEntry] = Field(default_factory=dict)
+    gui: Dict[str, Any] = Field(default_factory=dict)
+    metadata_extraction_level: str = Field(default="basic")
+    metadata_fields_to_extract: List[str] = Field(default_factory=list)
 
     # --- Validators ---
     @field_validator("embedding_model_query", mode="before")
@@ -464,7 +462,6 @@ class MainConfig(BaseModel):
         index_model = info.data.get("embedding_model_index")
         return v or index_model
 
-    # Validator for scraping_individual_request_timeout_s (replaces _validate_scraping_timeout)
     @field_validator("scraping_individual_request_timeout_s")
     @classmethod
     def _validate_scraping_individual_request_timeout(cls, v: int) -> int:
@@ -474,12 +471,9 @@ class MainConfig(BaseModel):
             )
         return v
 
-    # Validator for scraping_global_timeout_s
     @field_validator("scraping_global_timeout_s")
     @classmethod
     def check_global_timeout_vs_individual(cls, v: int, info: ValidationInfo) -> int:
-        # Use .get with a default for individual_timeout in case it's not yet processed by Pydantic
-        # or if it's missing (though it has a default in the model)
         individual_timeout = info.data.get("scraping_individual_request_timeout_s", 60)
         if v < individual_timeout:
             logger.warning(
@@ -495,6 +489,13 @@ class MainConfig(BaseModel):
     def _validate_max_pages(cls, v: Optional[int]) -> Optional[int]:
         if v is not None and v < 1:
             raise ValueError("scraping_max_pages_per_domain must be None or at least 1")
+        return v
+
+    @field_validator("scraping_min_content_length")  # Validator for the new field
+    @classmethod
+    def _validate_min_content_length(cls, v: int) -> int:
+        if v < 0:
+            raise ValueError("scraping_min_content_length cannot be negative.")
         return v
 
     class Config:
@@ -526,3 +527,6 @@ def save_config_to_path(config: MainConfig, config_path: Union[str, Path]):
         logger.info(f"Configuration saved to {config_file}")
     except Exception as e:
         logger.error(f"Failed to save config to {config_file}: {e}", exc_info=True)
+
+
+# --- END OF scripts/config_models.py ---

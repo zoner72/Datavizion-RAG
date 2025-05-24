@@ -12,8 +12,6 @@ import uvicorn
 from fastapi import Body, Depends, FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
-from config_models import MainConfig
-
 try:
     project_root = Path(__file__).resolve().parents[2]
     if str(project_root) not in sys.path:
@@ -30,7 +28,7 @@ except Exception as e:
         f"WARNING [API Server]: Error calculating project root for sys.path: {e}. Using fallback.",
         file=sys.stderr,
     )
-# ---------------------------------------
+from config_models import MainConfig
 
 # --- Pydantic Config Import (Corrected) ---
 try:
@@ -217,7 +215,9 @@ def initialize_server_components(config_obj: MainConfig) -> bool:
 
         # 2. Index Manager (Uses config)
         logger.info("Initializing Qdrant Index Manager...")
-        index_manager = QdrantIndexManager(config_obj, index_embedding_model)
+        index_manager = QdrantIndexManager(
+            config=config_obj, model_index=index_embedding_model
+        )
         if not index_manager.check_connection():
             # Log warning but maybe allow server to start? Or return False?
             logger.warning(
@@ -499,6 +499,11 @@ async def health_check(
 # -------------------
 
 # --- Main Execution (For running server.py directly) ---
+# File: scripts/api/server.py
+
+# ... (all imports and existing code up to the __main__ block) ...
+
+# --- Main Execution (For running server.py directly) ---
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Knowledge LLM API Server (direct run)"
@@ -521,15 +526,19 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
+    # --- Step 1: Attempt to load config from --config argument ---
+    # This block runs ONLY in the main process (the one you directly execute)
     if args.config:
         print(
             f"INFO: Direct run with --config argument. Reloading config from: {args.config}",
             file=sys.stderr,
         )
-        # Reload the global config variable using the specified path
-        config = load_and_validate_config(args.config)
-        # Re-apply logging level from this specific config load if successful
-        if isinstance(config, MainConfig):
+        # Load config using the path from the command line argument
+        loaded_config_from_args = load_and_validate_config(args.config)
+
+        # If successfully loaded, update the global 'config' variable
+        if isinstance(loaded_config_from_args, MainConfig):
+            config = loaded_config_from_args  # Update the global 'config'
             try:
                 log_level_str = getattr(config.logging, "level", "INFO").upper()
                 log_level = getattr(logging, log_level_str, logging.INFO)
@@ -541,16 +550,52 @@ if __name__ == "__main__":
                 logger.error(
                     f"Failed to reconfigure logging from --config file: {log_e}"
                 )
+        else:
+            # If loading from args.config failed, the global 'config' might still be None
+            # from the initial module-level load attempt.
+            print(
+                "CRITICAL: Direct run: Config specified via --config could not be loaded or validated. Exiting.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
 
-    # Check if config is valid after potentially reloading
+    # --- Step 2: Ensure the global 'config' is valid for Uvicorn's worker ---
+    # This is crucial. The worker process will re-import the module and
+    # will only see the 'config' variable initialized by the module-level call.
+    # We must ensure the environment variable is set for the worker.
     if config is None or not isinstance(config, MainConfig):
+        # This condition should ideally not be hit if --config was successful.
+        # It would only be hit if no --config was provided AND the ENV_VAR was not set.
         print(
-            "CRITICAL: Direct run: Config could not be loaded or validated. Check config path and content. Exiting.",
+            "CRITICAL: Direct run: Config could not be loaded or validated (neither via --config nor env var). Check config path and content. Exiting.",
             file=sys.stderr,
         )
         sys.exit(1)
 
-    # Determine host/port: Command line args override config values
+    # --- SOLUTION: Set the environment variable for Uvicorn's worker process ---
+    # This ensures the worker process (which re-imports the module) can find the config.
+    # We use the path that was successfully loaded by the main process.
+    config_path_for_env = Path(
+        os.environ.get(ENV_CONFIG_PATH_VAR) or args.config
+    ).resolve()
+    if not config_path_for_env.is_file():
+        # Fallback if args.config was relative and os.environ.get was None
+        config_path_for_env = (
+            (Path(os.getcwd()) / args.config).resolve() if args.config else None
+        )
+        if not config_path_for_env or not config_path_for_env.is_file():
+            logger.critical(
+                "Could not determine a valid config path to set for Uvicorn worker environment. Exiting."
+            )
+            sys.exit(1)
+
+    os.environ[ENV_CONFIG_PATH_VAR] = str(config_path_for_env)
+    logger.info(
+        f"Set environment variable {ENV_CONFIG_PATH_VAR}={os.environ[ENV_CONFIG_PATH_VAR]} for Uvicorn worker."
+    )
+    # --- END SOLUTION ---
+
+    # Determine host/port
     try:
         run_host = args.host if args.host else config.api.host
         run_port = args.port if args.port else config.api.port
@@ -560,11 +605,9 @@ if __name__ == "__main__":
         )
         sys.exit(1)
 
-    # Initialization now happens reliably in the lifespan event handler based on the globally loaded 'config'
-
     # Start Uvicorn Server
     try:
-        log_level_uvicorn = config.logging.level.lower()  # Get log level for uvicorn
+        log_level_uvicorn = config.logging.level.lower()
         print(
             f"INFO: Starting Uvicorn server on http://{run_host}:{run_port} (Reload: {args.reload}, LogLevel: {log_level_uvicorn})",
             file=sys.stderr,
@@ -574,12 +617,11 @@ if __name__ == "__main__":
         )
 
         uvicorn.run(
-            "scripts.api.server:app",  # Point to the FastAPI app instance in *this file*
+            "scripts.api.server:app",
             host=run_host,
             port=run_port,
-            reload=args.reload,  # Enable/disable reload based on arg
-            log_level=log_level_uvicorn,  # Set uvicorn's log level
-            # reload_dirs=[str(project_root / 'scripts')] if args.reload else None # Optional: specify dirs to watch
+            reload=args.reload,
+            log_level=log_level_uvicorn,
         )
     except ImportError:
         logger.critical(

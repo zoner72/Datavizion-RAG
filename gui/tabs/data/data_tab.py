@@ -221,66 +221,79 @@ class ScrapeWorker(BaseWorker):
     def __init__(
         self,
         config: MainConfig,
-        main_window,
+        main_window,  # Should have a 'project_root' attribute
         url: str,
-        mode: str,
         pdf_log_path: Path = None,
         output_dir: Path = None,
     ):
         super().__init__(config, main_window)
         self.url = url
-        self.mode = mode
         self.pdf_log_path = pdf_log_path
         if output_dir:
             self.output_dir = output_dir
         elif hasattr(self.config, "data_directory") and self.config.data_directory:
             self.output_dir = Path(self.config.data_directory) / "scraped"
         else:
+            # Fallback for project_root if main_window isn't fully set up (e.g., in tests)
+            project_root_default = (
+                Path(__file__).resolve().parents[3]
+                if "__file__" in locals()
+                else Path(".")
+            )
             project_root_fallback = getattr(
-                self.main_window, "project_root", Path(__file__).resolve().parents[3]
+                self.main_window, "project_root", project_root_default
             )
             self.output_dir = project_root_fallback / "data" / "scraped"
             logger.warning(
-                f"ScrapeWorker: data_directory not in config, defaulting output_dir to {self.output_dir}"
+                f"ScrapeWorker: data_directory not in config or main_window.project_root unavailable, defaulting output_dir to {self.output_dir}"
             )
         self._process: Optional[subprocess.Popen] = None
 
     @pyqtSlot()
     def stop(self):
         was_actively_processing_before_super_stop = self._is_actively_processing
+        # Call super().stop() first to set self._stop_requested = True
+        # and self._is_actively_processing = False (as per dummy BaseWorker example)
         super().stop()
 
+        # Now check if we need to kill the subprocess
+        # The self._is_actively_processing check might be redundant if super().stop() sets it to False
+        # but we use was_actively_processing_before_super_stop to reflect the state *before* super().stop() was called.
         if (
-            was_actively_processing_before_super_stop
-            and self._process
-            and self._process.poll() is None
+            was_actively_processing_before_super_stop  # Check if it *was* processing
+            and self._process  # Check if process exists
+            and self._process.poll() is None  # Check if process is still running
         ):
             logger.info(
                 f"ScrapeWorker.stop(): Attempting to kill scrape subprocess PID: {self._process.pid} for URL {self.url}"
             )
             try:
-                self._process.kill()
+                self._process.kill()  # Send SIGKILL
                 logger.debug(
-                    f"Scrape process for {self.url} kill signal sent via ScrapeWorker.stop()."
+                    f"Scrape process for {self.url} (PID: {self._process.pid}) kill signal sent via ScrapeWorker.stop()."
                 )
-            except Exception as e:
+            except (
+                Exception
+            ) as e:  # Catch ProcessLookupError if already gone, or other OS errors
                 logger.warning(
-                    f"Failed to kill scrape process for {self.url} during ScrapeWorker.stop(): {e}"
+                    f"Failed to kill scrape process for {self.url} (PID: {self._process.pid if self._process else 'N/A'}) during ScrapeWorker.stop(): {e}"
                 )
         elif self._process and self._process.poll() is not None:
             logger.debug(
-                f"Scrape process for {self.url} already finished when ScrapeWorker.stop() was processed."
+                f"Scrape process for {self.url} (PID: {self._process.pid if self._process else 'N/A'}) already finished when ScrapeWorker.stop() was processed."
             )
-        else:
-            logger.debug(
-                f"No active scrape process to kill or worker already stopping in ScrapeWorker.stop() for {self.url}."
-            )
+        # No explicit 'else' needed if no process or already stopping, as super().stop() handled the flags.
+        # else:
+        #     logger.debug(
+        #         f"No active scrape process to kill or worker already stopping in ScrapeWorker.stop() for {self.url}."
+        #     )
 
     def _execute_run(self):
         collected_stdout_lines = []
-        collected_stderr_lines = []
-        self._progress_signal_active = False
+        # collected_stderr_lines = [] # Merged into stdout
+        self._progress_signal_active = False  # Assuming BaseWorker might use this
 
+        # Default result if something goes very wrong early
         script_result_data = {
             "status": "error_worker_unhandled_state",
             "message": "Scrape worker finished in an unexpected state.",
@@ -289,173 +302,223 @@ class ScrapeWorker(BaseWorker):
             "output_paths": [],
         }
 
-        try:  # Added outer try for robustness within _execute_run
+        try:
             if self._check_stop_requested(
                 log_message_on_stop=f"ScrapeWorker for {self.url}: Operation cancelled before script execution."
+                # emit_error_on_stop is True by default in _check_stop_requested
             ):
-                script_result_data["status"] = "cancelled"
-                script_result_data["message"] = "Scraping cancelled before start."
-                self.finished.emit(script_result_data)
+                script_result_data["status"] = (
+                    "cancelled_before_start"  # More specific status
+                )
+                script_result_data["message"] = (
+                    "Scraping cancelled before script started."
+                )
+                # self.error.emit is already called by _check_stop_requested if emit_error_on_stop is True
+                self.finished.emit(
+                    script_result_data
+                )  # Emit finished to clean up thread
                 return
 
+            # Determine project_root safely
+            project_root_default = (
+                Path(__file__).resolve().parents[3]
+                if "__file__" in locals()
+                else Path(".")
+            )
             project_root = getattr(
-                self.main_window,
-                "project_root",
-                Path(__file__)
-                .resolve()
-                .parents[3],  # gui/tabs/data -> gui/tabs -> gui -> project_root
+                self.main_window, "project_root", project_root_default
             )
 
-            script_path = project_root / "scripts" / "ingest" / "scrape_pdfs.py"
+            # Construct script_path, ensure it's str for subprocess
+            script_path_obj = project_root / "scripts" / "ingest" / "scrape_pdfs.py"
+            script_path = str(script_path_obj)
 
-            logger.info(
-                f"ScrapeWorker: Attempting to use script path: {script_path}"
-            )  # Added log for path
+            logger.info(f"ScrapeWorker: Attempting to use script path: {script_path}")
 
-            if not script_path.exists():
+            if not script_path_obj.exists():
                 msg = f"Scrape script not found at: {script_path}"
                 logger.error(msg)
-                self.error.emit(msg)
+                self.error.emit(msg)  # Signal error to GUI
                 script_result_data["message"] = msg
                 script_result_data["status"] = "error_script_not_found"
-                self.finished.emit(script_result_data)
+                self.finished.emit(
+                    script_result_data
+                )  # Emit finished to clean up thread
                 return
 
+            # Ensure output directory exists
             self.output_dir.mkdir(parents=True, exist_ok=True)
+
+            # Construct command for subprocess
             command = [
-                sys.executable,
-                "-u",
-                str(script_path),
+                sys.executable,  # Use current Python interpreter
+                "-u",  # Unbuffered stdout/stderr
+                script_path,
                 "--url",
                 self.url,
                 "--output-dir",
                 str(self.output_dir),
-                "--mode",
-                self.mode,
                 "--config",
                 str(project_root / "config" / "config.json"),
             ]
             if self.pdf_log_path:
-                command += ["--pdf-link-log", str(self.pdf_log_path)]
+                command.extend(["--pdf-link-log", str(self.pdf_log_path)])
 
             self.statusUpdate.emit(f"Starting scrape script for {self.url}...")
             logger.info(f"Executing scrape for {self.url}: {' '.join(command)}")
 
+            # Start the subprocess
             self._process = subprocess.Popen(
                 command,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,  # <<< merge stderr into stdout
-                text=True,
-                bufsize=1,
+                stderr=subprocess.STDOUT,  # Merge stderr into stdout
+                text=True,  # Decode output as text
+                bufsize=1,  # Line buffered
+                errors="replace",  # Handle potential decoding errors in script output
             )
 
             logger.info(
                 f"Scrape subprocess started (PID: {self._process.pid}) for URL: {self.url}. Reading output..."
             )
 
+            # Read output line by line
             if self._process.stdout:
-                for line in iter(self._process.stdout.readline, ""):
+                for line_raw in iter(self._process.stdout.readline, ""):
                     if self._check_stop_requested(
                         log_message_on_stop=f"ScrapeWorker for {self.url} cancelled while reading script stdout.",
-                        emit_error_on_stop=False,
+                        emit_error_on_stop=False,  # Don't emit error here, will be handled by cancelled status
                     ):
-                        if self._process.poll() is None:
+                        if self._process.poll() is None:  # If process still running
                             logger.info(
                                 f"Killing process {self._process.pid} due to cancellation (stdout loop)."
                             )
                             self._process.kill()
-                        break
-                    line = line.strip()
-                    if line:
+                        break  # Exit stdout reading loop
+
+                    line = line_raw.strip()  # .strip() here
+                    if line:  # Only process non-empty lines
                         logger.info(f"[Scrape Script - {self.url}]: {line}")
-                        collected_stdout_lines.append(line)
+                        collected_stdout_lines.append(line)  # Store stripped line
+                        # Optional: Try to parse intermediate status updates if your script sends them as JSON
+                        # This part is for live updates, not the final result parsing.
                         try:
-                            json_line = json.loads(line)
-                            if (
-                                isinstance(json_line, dict)
-                                and "status" in json_line
-                                and "message" in json_line
-                            ):
-                                if "SCRAPE STATUS" in json_line.get("message", ""):
-                                    self.statusUpdate.emit(json_line["message"])
+                            json_line_check = json.loads(line)
+                            if isinstance(
+                                json_line_check, dict
+                            ) and "SCRAPE STATUS" in json_line_check.get("message", ""):
+                                self.statusUpdate.emit(json_line_check["message"])
                         except json.JSONDecodeError:
-                            pass  # Regular log line
+                            pass  # It's a regular log line, not an intermediate JSON status
                 logger.debug(f"Finished reading stdout for {self.url}")
-            else:
+            else:  # Should not happen with Popen setup
                 logger.error(
                     f"Subprocess stdout is None for {self.url}. Cannot read output."
                 )
+                # This is a worker setup error, script likely didn't even start properly
+                script_result_data["status"] = "error_worker_stdout_pipe"
+                script_result_data["message"] = (
+                    "Worker failed to get stdout pipe from subprocess."
+                )
+                self.error.emit(script_result_data["message"])
+                self.finished.emit(script_result_data)
+                return
 
+            # Handle if stop was requested during stdout reading
             if self._stop_requested:
+                # Ensure process is terminated if stop was requested and loop broke
                 if self._process and self._process.poll() is None:
                     logger.info(
                         f"Ensuring process {self._process.pid} is terminated due to stop request (after stdout loop)."
                     )
                     self._process.kill()
-                script_result_data["status"] = "cancelled"
-                script_result_data["message"] = "Scraping operation was cancelled."
-                if self._process and self._process.stderr:
+
+                script_result_data["status"] = "cancelled_during_run"
+                script_result_data["message"] = (
+                    "Scraping operation was cancelled during execution."
+                )
+                # Try to get any final output after kill (stderr was merged)
+                if self._process:
                     try:
-                        stderr_after_kill, _ = self._process.communicate(timeout=0.5)
-                        if stderr_after_kill:
-                            collected_stderr_lines.extend(
-                                stderr_after_kill.strip().splitlines()
+                        # Use communicate to get any remaining output after kill/stop
+                        # Timeout is small as process should be ending.
+                        final_output_after_stop, _ = self._process.communicate(
+                            timeout=1.0
+                        )
+                        if final_output_after_stop:
+                            collected_stdout_lines.extend(
+                                final_output_after_stop.strip().splitlines()
                             )
-                    except:
-                        pass
-                if collected_stderr_lines:
+                            logger.debug(
+                                f"Collected further output after stop/kill: {final_output_after_stop[:200]}"
+                            )
+                    except subprocess.TimeoutExpired:
+                        logger.warning(
+                            f"Timeout waiting for subprocess output after stop/kill for {self.url}"
+                        )
+                    except Exception as e_comm_stop:
+                        logger.warning(
+                            f"Error in communicate after stop/kill for {self.url}: {e_comm_stop}"
+                        )
+
+                if collected_stdout_lines:  # Use stdout as stderr is merged
+                    # Add some context to the message if there was output
+                    partial_output_str = " ".join(collected_stdout_lines)
                     script_result_data["message"] += (
-                        f"\nPartial Stderr: {' '.join(collected_stderr_lines)[:200]}"
+                        f"\nPartial Output: {partial_output_str[:200]}..."
+                        if len(partial_output_str) > 200
+                        else f"\nPartial Output: {partial_output_str}"
                     )
+                # self.error.emit might have been called by _check_stop_requested if emit_error_on_stop was True.
+                # If emit_error_on_stop was False, then we might want to emit error here,
+                # or rely on finished with "cancelled" status. For consistency, let 'finished' handle it.
                 self.finished.emit(script_result_data)
                 return
 
-            return_code = -1
+            # Process finished, get return code and parse output
+            return_code = -1  # Default if process somehow vanishes
             if self._process:
                 try:
-                    script_execution_timeout = (
-                        self.config.scraping_global_timeout_s
-                        if hasattr(self.config, "scraping_global_timeout_s")
-                        and self.config.scraping_global_timeout_s > 0
-                        else 900
+                    # Determine script execution timeout from config
+                    script_execution_timeout_cfg = getattr(
+                        self.config, "scraping_global_timeout_s", 0
                     )
-                    if self._process.poll() is None:
+                    script_execution_timeout = (
+                        script_execution_timeout_cfg
+                        if script_execution_timeout_cfg > 0
+                        else 900
+                    )  # Default 15 mins
+
+                    if (
+                        self._process.poll() is None
+                    ):  # If still running, wait with timeout
                         logger.debug(
-                            f"Waiting for scrape process {self._process.pid} to complete (timeout: {script_execution_timeout}s)"
+                            f"Waiting for scrape process {self._process.pid} to complete (worker timeout: {script_execution_timeout}s)"
                         )
                         try:
-                            stdout_remaining, stderr_remaining = (
-                                self._process.communicate(
-                                    timeout=script_execution_timeout
-                                )
-                            )
+                            # communicate() will read remaining stdout/stderr and wait for process to end
+                            stdout_remaining, _ = self._process.communicate(
+                                timeout=script_execution_timeout
+                            )  # stderr is already in stdout_remaining
                             if stdout_remaining:
                                 collected_stdout_lines.extend(
                                     stdout_remaining.strip().splitlines()
                                 )
-                            if stderr_remaining:
-                                collected_stderr_lines.extend(
-                                    stderr_remaining.strip().splitlines()
-                                )
                         except subprocess.TimeoutExpired:
                             logger.error(
-                                f"Scrape script (PID: {self._process.pid}) for {self.url} worker-level timeout after {script_execution_timeout}s. Killing."
+                                f"Scrape script (PID: {self._process.pid}) for {self.url} timed out after {script_execution_timeout}s at worker level. Killing."
                             )
                             self._process.kill()
+                            # Try to get any final words after kill
                             try:
-                                stdout_after_kill, stderr_after_kill = (
-                                    self._process.communicate(timeout=2)
+                                stdout_after_kill, _ = self._process.communicate(
+                                    timeout=2
                                 )
                                 if stdout_after_kill:
                                     collected_stdout_lines.extend(
-                                        f"\n[AFTER TIMEOUT KILL]\n{stdout_after_kill.strip()}".splitlines()
-                                    )
-                                if stderr_after_kill:
-                                    collected_stderr_lines.extend(
-                                        f"\n[AFTER TIMEOUT KILL]\n{stderr_after_kill.strip()}".splitlines()
+                                        f"\n[AFTER WORKER TIMEOUT KILL]\n{stdout_after_kill.strip()}".splitlines()
                                     )
                             except:
-                                pass
+                                pass  # Ignore errors here, best effort
                             script_result_data["status"] = "error_worker_timeout"
                             script_result_data["message"] = (
                                 f"Scrape script for {self.url} timed out in worker and was terminated."
@@ -464,106 +527,123 @@ class ScrapeWorker(BaseWorker):
                             self.finished.emit(script_result_data)
                             return
                     return_code = self._process.returncode
-                except Exception as e_comm:
+                except Exception as e_comm_wait:  # Catch errors during communicate/wait
                     logger.warning(
-                        f"Exception during final communicate/wait for {self.url} (PID: {self._process.pid if self._process else 'N/A'}): {e_comm}"
+                        f"Exception during final communicate/wait for {self.url} (PID: {self._process.pid if self._process else 'N/A'}): {e_comm_wait}"
                     )
                     if self._process and self._process.poll() is not None:
                         return_code = self._process.returncode
-                    else:
-                        script_result_data["status"] = "error_process_state_unknown"
+                    else:  # Could not determine state or return code
+                        script_result_data["status"] = "error_process_communication"
                         script_result_data["message"] = (
-                            f"Error determining final state of scrape process for {self.url}."
+                            f"Error communicating with or determining final state of scrape process for {self.url}."
                         )
+                        # Fall through to JSON parsing attempt with available output
 
-            final_stderr_str = "\n".join(collected_stderr_lines).strip()
-            if final_stderr_str:
-                logger.warning(
-                    f"Stderr from scrape script for {self.url} (RC={return_code}):\n{final_stderr_str}"
+            # Attempt to parse the collected stdout for the final JSON result
+            parsed_json_from_stdout = None
+            full_stdout_str = "\n".join(
+                collected_stdout_lines
+            ).strip()  # Join all stripped lines
+
+            if full_stdout_str:
+                try:
+                    # Heuristic: find the last occurrence of '{' and '}'
+                    # This assumes the JSON blob is the last major structured output.
+                    idx_open_brace = full_stdout_str.rfind("{")
+                    idx_close_brace = full_stdout_str.rfind("}")
+
+                    if idx_open_brace != -1 and idx_close_brace > idx_open_brace:
+                        json_candidate_str = full_stdout_str[
+                            idx_open_brace : idx_close_brace + 1
+                        ]
+                        logger.debug(
+                            f"JSON candidate from stdout for {self.url}: {json_candidate_str[:200]}..."
+                        )
+                        parsed_json_from_stdout = json.loads(json_candidate_str)
+                        script_result_data.update(
+                            parsed_json_from_stdout
+                        )  # Merge parsed data
+                        logger.info(
+                            f"Successfully parsed final JSON from script stdout for {self.url}. Status: '{script_result_data.get('status')}'"
+                        )
+                    else:
+                        logger.warning(
+                            f"Could not find JSON object delimiters '{{...}}' in stdout for {self.url}. Full stdout (first 500 chars): {full_stdout_str[:500]}"
+                        )
+                except json.JSONDecodeError as e_json:
+                    logger.error(
+                        f"Failed to parse identified JSON candidate from stdout for {self.url}. Error: {e_json}. Candidate snippet: {json_candidate_str[:200] if 'json_candidate_str' in locals() else 'N/A'}. Full stdout (first 500 chars): {full_stdout_str[:500]}"
+                    )
+                    # parsed_json_from_stdout remains None, error status will be set below
+
+            # Finalize status based on parsing success and return code
+            if (
+                parsed_json_from_stdout is None
+            ):  # If JSON parsing failed or no candidate found
+                logger.error(
+                    f"No valid JSON result parsed from scrape script stdout for {self.url}."
                 )
-
-            last_json_line = ""
-            if collected_stdout_lines:
-                for line in reversed(collected_stdout_lines):
-                    if line.strip():
-                        last_json_line = line.strip()
-                        break
-
-            if not last_json_line:
-                logger.warning(
-                    f"Scrape script for {self.url} (rc={return_code}) produced no discernible final JSON on stdout."
-                )
+                original_message = script_result_data.get(
+                    "message", ""
+                )  # Preserve any earlier message
                 if return_code == 0:
-                    script_result_data.update(
-                        {
-                            "status": "success_no_json_output",
-                            "message": f"Scraping for {self.url} completed (rc=0); no structured result from script.",
-                        }
+                    script_result_data["status"] = "error_parsing_json_output"
+                    script_result_data["message"] = (
+                        f"Script for {self.url} completed (rc=0), but its JSON output could not be parsed."
                     )
                 else:
-                    script_result_data.update(
-                        {
-                            "status": f"error_script_rc_{return_code}_no_json",
-                            "message": f"Scraping for {self.url} failed (rc={return_code}) and no structured result.",
-                        }
+                    script_result_data["status"] = (
+                        f"error_script_rc_{return_code}_no_json"
                     )
-            else:
-                try:
-                    parsed_json_result = json.loads(last_json_line)
-                    script_result_data.update(parsed_json_result)
-                    logger.info(
-                        f"Parsed final JSON from scrape script for {self.url}: status='{script_result_data.get('status')}'"
+                    script_result_data["message"] = (
+                        f"Script for {self.url} failed (rc={return_code}) and its JSON output could not be parsed."
                     )
-                except json.JSONDecodeError:
-                    logger.error(
-                        f"Failed to parse final line from stdout as JSON for {self.url}. Line: '{last_json_line}'."
-                    )
-                    script_result_data.update(
-                        {
-                            "status": "error_parsing_final_json",
-                            "message": "Scrape script output ended with non-JSON line.",
-                        }
+                if (
+                    original_message
+                    and original_message != script_result_data["message"]
+                ):
+                    script_result_data["message"] += (
+                        f" (Original worker state: {original_message})"
                     )
 
+            # Ensure standard fields are present in the result
             script_result_data.setdefault("url", self.url)
             script_result_data.setdefault(
                 "pdf_log_path", str(self.pdf_log_path) if self.pdf_log_path else None
             )
-            script_result_data.setdefault("output_paths", [])
+            script_result_data.setdefault("output_paths", [])  # Ensure it's a list
 
-            current_parsed_status = script_result_data.get(
-                "status", "error_unknown_status"
+            # Override status if script had non-zero exit code but JSON claimed success
+            current_status_from_json = script_result_data.get(
+                "status", "error_unknown_status_after_parse"
             )
-
             if return_code != 0:
-                if "success" in current_parsed_status:
+                if "success" in current_status_from_json:
                     logger.warning(
-                        f"Script for {self.url} exited with RC={return_code} but JSON status was '{current_parsed_status}'. Overriding."
+                        f"Script for {self.url} exited with RC={return_code} but parsed JSON status was '{current_status_from_json}'. Overriding status."
                     )
-                    script_result_data["status"] = "error_script_rc_mismatch"
+                    script_result_data["status"] = "error_script_rc_mismatch_with_json"
+                    # Preserve message from JSON if it's more informative, otherwise set a default.
                     script_result_data.setdefault(
                         "message",
-                        f"Scrape script failed (Code: {return_code}) despite JSON status.",
+                        f"Script failed (Code: {return_code}) despite JSON indicating success.",
                     )
                 elif (
-                    "error" not in current_parsed_status
-                    and current_parsed_status != "cancelled"
+                    "error" not in current_status_from_json
+                    and current_status_from_json != "cancelled_before_start"
+                    and current_status_from_json != "cancelled_during_run"
                 ):
+                    # If JSON status wasn't already an error or cancellation, set one based on RC
                     script_result_data["status"] = f"error_script_rc_{return_code}"
                     script_result_data.setdefault(
-                        "message", f"Scrape script failed (Code: {return_code})."
+                        "message",
+                        f"Scrape script failed with return code: {return_code}.",
                     )
 
-            if final_stderr_str and "error" in script_result_data.get("status", ""):
-                msg_key = (
-                    "message" if "message" in script_result_data else "error_details"
-                )
-                script_result_data[msg_key] = (
-                    f"{script_result_data.get(msg_key, '')}\nStderr: {final_stderr_str[:500]}".strip()
-                )
-
+            # Emit final signals
             final_gui_status_message = script_result_data.get(
-                "message", f"Scraping for {self.url} finished."
+                "message", f"Scraping for {self.url} finished with unstated outcome."
             )
             self.statusUpdate.emit(final_gui_status_message)
 
@@ -571,25 +651,26 @@ class ScrapeWorker(BaseWorker):
                 self.finished.emit(script_result_data)
             else:
                 logger.error(
-                    f"Scrape for {self.url} final status: '{script_result_data.get('status')}'. Message: '{final_gui_status_message}'"
+                    f"Scrape for {self.url} concluded with non-success. Final status: '{script_result_data.get('status')}'. Message: '{final_gui_status_message}'"
                 )
-                self.error.emit(final_gui_status_message)
-        except (
-            Exception
-        ) as e_outer_worker:  # Catch-all for unexpected errors in _execute_run
+                self.error.emit(final_gui_status_message)  # Emit error string for GUI
+                self.finished.emit(
+                    script_result_data
+                )  # Also emit finished with the error dict for cleanup
+
+        except Exception as e_outer_worker:
             logger.critical(
                 f"Outer critical exception in ScrapeWorker._execute_run() for {self.url}: {e_outer_worker}",
                 exc_info=True,
             )
-            # BaseWorker.run() will also catch this, but we can set a more specific status here
             script_result_data["status"] = "error_worker_internal_exception"
             script_result_data["message"] = (
-                f"Internal ScrapeWorker error: {e_outer_worker}"
+                f"Internal ScrapeWorker error: {str(e_outer_worker)}"
             )
             self.error.emit(script_result_data["message"])
             self.finished.emit(
                 script_result_data
-            )  # Emit finished even on this type of error
+            )  # Ensure finished is emitted for thread cleanup
 
 
 class PDFDownloadWorker(BaseWorker):
@@ -1310,6 +1391,41 @@ class DataTab(QWidget):
                 )
         return None
 
+    def handle_scrape_finished(self, result: dict):
+        url = result.get("url")  # or however you track which site was scraped
+        # existing logic...
+        scraped_count = len(result.get("output_paths", []))
+        indexed_count = result.get("processed", 0)
+        logger.info(
+            f"Scrape → Index: {scraped_count} files scraped, {indexed_count} items indexed."
+        )
+        # 2) compute PDF count from the log file
+        pdf_count = 0
+        try:
+            output_dir = (
+                Path(self.config.data_directory)
+                / "scraped"
+                / f"site_{hashlib.md5(url.encode()).hexdigest()[:8]}"
+            )
+            log_path = output_dir / "pdf_links_log.json"
+            if log_path.exists():
+                links = json.load(open(log_path, encoding="utf-8"))
+                pdf_count = len(links)
+        except Exception:
+            pdf_count = 0
+
+        # 3) update the table cell: show “N/A (1234)”
+        table = self.data_tab.scraped_websites_table
+        for row in range(table.rowCount()):
+            item = table.item(row, 0)
+            if item and item.text() == url:
+                # column 3 is “PDFs Indexed”
+                pdf_item = table.item(row, 3) or QTableWidgetItem()
+                pdf_item.setText(f"N/A ({pdf_count})")
+                pdf_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                table.setItem(row, 3, pdf_item)
+                break
+
     def set_indexed_status_for_url(
         self, url: str, is_indexed: bool, pdf_count: int | None = None
     ):
@@ -1787,7 +1903,6 @@ class DataTab(QWidget):
                 ScrapeWorker,
                 key="primary_operation",
                 url=url,
-                mode="text",
                 pdf_log_path=log_path,
                 output_dir=output_dir,
             )
@@ -1808,7 +1923,7 @@ class DataTab(QWidget):
             )
             return
         url = self.sanitize_url(url)
-        if not hasattr(self.config, "data_directory") or not self.config.data_directory:
+        if not getattr(self.config, "data_directory", None):
             self.show_message(
                 "Error", "Data directory not configured.", QMessageBox.Icon.Critical
             )
@@ -1828,19 +1943,32 @@ class DataTab(QWidget):
                 QMessageBox.Icon.Warning,
             )
             return
+
         try:
             with open(log_path, "r", encoding="utf-8") as f:
-                content = f.read()
-            links = json.loads(content) if content else []
-            if not isinstance(links, list):
-                raise ValueError("Log file format invalid.")
-        except (json.JSONDecodeError, ValueError, Exception) as e:
+                links_data = json.load(f)
+            if not isinstance(links_data, list):
+                raise ValueError("Expected a top-level JSON list")
+
+            # Accept list of URL strings or list of dicts with 'pdf_url'
+            if all(isinstance(item, str) for item in links_data):
+                links = links_data
+            elif all(
+                isinstance(item, dict) and "pdf_url" in item for item in links_data
+            ):
+                links = [item["pdf_url"] for item in links_data]
+            else:
+                raise ValueError(
+                    "Log entries must be strings or dicts with a 'pdf_url' key"
+                )
+        except (json.JSONDecodeError, ValueError) as e:
             self.show_message(
                 "Log Read Error",
                 f"Failed to read/parse log:\n{log_path}\nError: {e}",
                 QMessageBox.Icon.Critical,
             )
             return
+
         if not links:
             self.show_message(
                 "No Links",
@@ -1848,6 +1976,7 @@ class DataTab(QWidget):
                 QMessageBox.Icon.Information,
             )
             return
+
         self.start_pdf_download_operation(links, source_url=url)
 
     def start_pdf_download_operation(

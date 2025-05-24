@@ -21,7 +21,7 @@
         "quantization_enabled": false,
         "quantization_always_ram": false,
         "search_params": {},
-        "force_recreate": false,
+        "force_recreate": true,
         "connection_retries": 3,
         "connection_initial_delay": 1,
         "client_timeout": 20,
@@ -31,16 +31,25 @@
             "parallel": 4
         }
     },
-    "embedding_model_index": "sentence-transformers/all-mpnet-base-v2",
-    "embedding_model_query": "sentence-transformers/all-mpnet-base-v2",
+    "embedding_model_index": "BAAI/bge-base-en-v1.5",
+    "vector_size": 1024,
+    "embedding_model_query": "BAAI/bge-base-en-v1.5",
     "model_prefixes": {
         "default": {
+            "query": "",
+            "document": ""
+        },
+        "BAAI/bge-base-en-v1.5": {
             "query": "",
             "document": ""
         },
         "BAAI/bge-small-en-v1.5": {
             "query": "",
             "document": ""
+        },
+        "BAAI/bge-large-en-v1.5": { 
+        "query": "",
+        "document": ""
         },
         "nomic-ai/nomic-embed-text-v1.5": {
             "query": "search_query: ",
@@ -61,11 +70,11 @@
     },
     "embedding_trust_remote_code": true,
     "indexing_profile": "normal",
-    "chunk_size": 150,
-    "chunk_overlap": 50,
+    "chunk_size": 250,
+    "chunk_overlap": 80,
     "boilerplate_removal": false,
     "indexing_batch_size": 100,
-    "embedding_batch_size": 32,
+    "embedding_batch_size": 48,
     "relevance_threshold": 0.4,
     "cache_enabled": false,
     "keyword_weight": 0.62,
@@ -84,6 +93,15 @@
     "scraping_global_timeout_s": 10800,
     "scraping_max_redirects": 10,
     "scraping_min_content_length": 50,
+    "scraping_content_selectors": [
+        ".article-body",
+        "#main-content",
+        "article.post-content",
+        ".entry-content",
+        ".text.hbk-text .cmp-text",
+        ".hbk-product-intro__description",
+        ".hbk-accordion-item__content .cmp-text"
+    ],
     "gui_worker_animation_ms": 200,
     "gui_status_trunc_len": 60,
     "gui_log_lines": 200,
@@ -91,7 +109,7 @@
     "api_monitor_interval_ms": 1500,
     "rejected_docs_foldername": "rejected_docs",
     "logging": {
-        "level": "DEBUG",
+        "level": "INFO",
         "format": "%(asctime)s - %(levelname)s - [%(name)s] - %(message)s",
         "max_bytes": 10485760,
         "backup_count": 12,
